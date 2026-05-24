@@ -77,7 +77,7 @@ class Project(BaseModel):
     custom_style: Optional[str] = None
     aspect_ratio: str = "16:9"
     resolution: str = "720p"  # "720p" or "1080p"
-    image_quality: str = "512"  # "512", "1K", "2K", "4K" — Nano Banana image_size
+    image_quality: str = "low"  # "low", "medium", "high" — OpenAI gpt-image-1-mini quality
     burn_subtitles: bool = True  # bake lyric text overlay into the MP4
     status: str = "created"  # created, transcribing, generating_images, rendering, completed, failed, cancelled
     progress: int = 0  # 0-100
@@ -485,7 +485,7 @@ async def create_project(
     style: str = Form("cinematic"),
     aspect_ratio: str = Form("16:9"),
     resolution: str = Form("720p"),
-    image_quality: str = Form("512"),
+    image_quality: str = Form("low"),
     custom_style: str = Form(""),
     burn_subtitles: bool = Form(True),
 ):
@@ -497,8 +497,8 @@ async def create_project(
         aspect_ratio = "16:9"
     if resolution not in ("720p", "1080p"):
         resolution = "720p"
-    if image_quality not in ("512", "1K", "2K", "4K"):
-        image_quality = "512"
+    if image_quality not in ("low", "medium", "high"):
+        image_quality = "low"
 
     custom = custom_style.strip() if custom_style else None
     if style == "other" and not custom:

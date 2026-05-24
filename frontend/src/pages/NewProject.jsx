@@ -22,7 +22,7 @@ export default function NewProject() {
   const [customStyle, setCustomStyle] = useState("");
   const [aspectRatio, setAspectRatio] = useState("16:9");
   const [resolution, setResolution] = useState("720p");
-  const [imageQuality, setImageQuality] = useState("512");
+  const [imageQuality, setImageQuality] = useState("low");
   const [burnSubtitles, setBurnSubtitles] = useState(true);
   const [dragging, setDragging] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -235,21 +235,20 @@ export default function NewProject() {
         </div>
       </div>
 
-      {/* Image quality (Gemini Nano Banana cost picker) */}
+      {/* Image quality (OpenAI gpt-image-1-mini cost picker) */}
       <div className="mt-8">
         <div className="flex items-baseline justify-between mb-2">
           <label className="label-tracking">Image quality</label>
-          <span className="text-[11px] text-zinc-500">Directly impacts your Google bill</span>
+          <span className="text-[11px] text-zinc-500">Directly impacts your OpenAI bill</span>
         </div>
         <div
           data-testid="image-quality-grid"
-          className="grid grid-cols-2 md:grid-cols-4 gap-2"
+          className="grid grid-cols-1 md:grid-cols-3 gap-2"
         >
           {[
-            { v: "512", label: "0.5K", res: "512×512", cost: "~$0.045", hint: "Cheapest · draft" },
-            { v: "1K", label: "1K", res: "1024×1024", cost: "~$0.067", hint: "Balanced" },
-            { v: "2K", label: "2K", res: "2048×2048", cost: "~$0.101", hint: "Sharper" },
-            { v: "4K", label: "4K", res: "4096×4096", cost: "~$0.151", hint: "Max detail" },
+            { v: "low", label: "Low", cost16: "~$0.006", cost9: "~$0.006", hint: "Cheapest · draft" },
+            { v: "medium", label: "Medium", cost16: "~$0.015", cost9: "~$0.015", hint: "Balanced" },
+            { v: "high", label: "High", cost16: "~$0.052", cost9: "~$0.052", hint: "Max detail" },
           ].map((q) => (
             <button
               key={q.v}
@@ -264,24 +263,22 @@ export default function NewProject() {
               <span className="block font-medium" style={{ fontFamily: "Outfit" }}>
                 {q.label}
               </span>
-              <span className="block text-[10px] text-zinc-500 tracking-widest mt-0.5">
-                {q.res}
-              </span>
               <span
                 className={`block text-[11px] tabular-nums mt-1 ${
                   imageQuality === q.v ? "text-amber-300" : "text-zinc-400"
                 }`}
               >
-                {q.cost}/img
+                {aspectRatio === "16:9" ? q.cost16 : q.cost9}/img
               </span>
               <span className="block text-[10px] text-zinc-600 mt-0.5">{q.hint}</span>
             </button>
           ))}
         </div>
         <p className="text-[11px] text-zinc-600 mt-2 leading-relaxed">
-          Final video is rendered at the resolution above (720p / 1080p); image quality only
-          controls the AI-generated scene art behind each lyric. <span className="text-zinc-500">0.5K
-          is plenty for a 720p video.</span>
+          Powered by OpenAI <span className="text-zinc-500">gpt-image-1-mini</span> at{" "}
+          {aspectRatio === "16:9" ? "1536×1024" : "1024×1536"}. Image quality only controls the
+          AI-generated scene art behind each lyric — final video still renders at your chosen
+          720p / 1080p output.
         </p>
       </div>
 

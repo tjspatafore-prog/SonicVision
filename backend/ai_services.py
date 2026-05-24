@@ -1,4 +1,4 @@
-"""AI services: OpenAI Whisper STT (Emergent key) and Gemini Nano Banana image generation (direct Google AI Studio key)."""
+"""AI services: OpenAI Whisper STT (Emergent key) and OpenAI gpt-image-1-mini image generation (direct OpenAI key)."""
 import base64
 import io
 import os
@@ -8,24 +8,24 @@ from typing import Any, Dict, List, Optional
 
 from PIL import Image
 from emergentintegrations.llm.openai import OpenAISpeechToText
-from google import genai
-from google.genai import types as genai_types
+from openai import AsyncOpenAI
 
 
 EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
-GOOGLE_AI_API_KEY = os.environ.get("GOOGLE_AI_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# Singleton Gemini client authenticated with the user's direct AI Studio key
-_gemini_client: Optional[genai.Client] = None
+# Singleton AsyncOpenAI client authenticated with the user's direct OpenAI key
+# (only used for image generation — Whisper stays on Emergent key above)
+_openai_client: Optional[AsyncOpenAI] = None
 
 
-def _get_gemini_client() -> genai.Client:
-    global _gemini_client
-    if _gemini_client is None:
-        if not GOOGLE_AI_API_KEY:
-            raise RuntimeError("GOOGLE_AI_API_KEY is not set — required for image generation")
-        _gemini_client = genai.Client(api_key=GOOGLE_AI_API_KEY)
-    return _gemini_client
+def _get_openai_client() -> AsyncOpenAI:
+    global _openai_client
+    if _openai_client is None:
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is not set — required for image generation")
+        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    return _openai_client
 
 
 async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
@@ -166,47 +166,35 @@ async def generate_scene_image(
     aspect_ratio: str = "16:9",
     custom_style: Optional[str] = None,
     variation_idx: int = 0,
-    image_size: str = "1K",
+    image_size: str = "low",
 ) -> str:
-    """Generate one image for a lyric phrase via Gemini Nano Banana 2 using the user's
-    direct Google AI Studio key (cost flows to the user's Google billing, NOT Emergent).
+    """Generate one image for a lyric phrase via OpenAI gpt-image-1-mini using the user's
+    direct OpenAI key (cost flows to the user's OpenAI billing, NOT Emergent).
 
-    image_size: "512" (cheapest ~$0.045), "1K" (~$0.067), "2K" (~$0.101), "4K" (~$0.151)."""
-    client = _get_gemini_client()
+    image_size: OpenAI quality tier — "low" (~$0.005-0.006/img), "medium" (~$0.011-0.015/img),
+                "high" (~$0.036-0.052/img). Default "low" = cheapest tier."""
+    client = _get_openai_client()
     prompt = _build_image_prompt(lyric, style, aspect_ratio, custom_style, variation_idx)
 
-    response = await client.aio.models.generate_content(
-        model="gemini-3.1-flash-image-preview",
-        contents=[prompt],
-        config=genai_types.GenerateContentConfig(
-            response_modalities=["IMAGE"],
-            image_config=genai_types.ImageConfig(
-                aspect_ratio=aspect_ratio,
-                image_size=image_size,
-            ),
-        ),
+    # Map our app's aspect ratio to OpenAI's supported sizes
+    size = "1536x1024" if aspect_ratio == "16:9" else "1024x1536"
+    quality = image_size if image_size in ("low", "medium", "high", "auto") else "low"
+
+    response = await client.images.generate(
+        model="gpt-image-1-mini",
+        prompt=prompt,
+        size=size,
+        quality=quality,
+        n=1,
     )
 
-    # Extract first inline image from candidates -> content -> parts
-    image_bytes: Optional[bytes] = None
-    for candidate in (response.candidates or []):
-        content = getattr(candidate, "content", None)
-        if not content:
-            continue
-        for part in (content.parts or []):
-            inline = getattr(part, "inline_data", None)
-            if inline and getattr(inline, "data", None):
-                data = inline.data
-                image_bytes = base64.b64decode(data) if isinstance(data, str) else data
-                break
-        if image_bytes:
-            break
+    if not response.data or not response.data[0].b64_json:
+        raise RuntimeError("gpt-image-1-mini returned no image")
 
-    if not image_bytes:
-        raise RuntimeError("Nano Banana returned no image")
+    image_bytes = base64.b64decode(response.data[0].b64_json)
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    # Normalize to PNG regardless of upstream format (JPEG/PNG/WebP)
+    # Normalize to PNG regardless of upstream format
     try:
         img = Image.open(io.BytesIO(image_bytes))
         if img.mode != "RGB":
