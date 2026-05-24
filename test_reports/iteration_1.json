@@ -1,0 +1,40 @@
+{
+  "summary": "Backend-only E2E testing of SonicVision AI music-video pipeline. All 22 pytest tests PASSED including full pipeline (Whisper transcription -> Nano Banana image gen -> MoviePy render -> SRT -> teaser 9:16 + 1:1). Verified all 19 endpoints listed in the review request work end-to-end against the live preview URL. NOTE: First attempt hit transient EMERGENT_LLM_KEY budget cap ('Max budget: 0.001 exceeded'); a few minutes later the budget appeared refreshed and the full suite passed cleanly. Main agent should be aware the key budget can run out under sustained testing.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "EMERGENT_LLM_KEY", "issue": "Encountered transient 'Budget has been exceeded! Max budget: 0.001' error from litellm during one run. Auto-recovered on retry but indicates the key budget is very low. May fail under repeated CI runs."},
+      {"endpoint": "/api/files/{project_id}/{filename}", "issue": "Path-traversal check uses simple substring match (`'..' in filename or '/' in filename`). Works for the obvious case but URL normalization handles the test request — consider Path resolution + parent check for defence-in-depth."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_sonicvision_e2e.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Monitor EMERGENT_LLM_KEY budget — observed 'Max budget: 0.001 exceeded' once during testing. If budget is exhausted again, replace key.",
+    "(Optional) Harden /api/files path-traversal guard with Path.resolve() + parent containment check."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 763 lines — borderline; consider splitting routes, pipeline, render-subprocess, and teaser modules.",
+    "_run_pipeline catches generic Exception; consider logging stderr from the render subprocess on failure (it currently truncates to 500 chars but is good enough).",
+    "Path-traversal check at /api/files/{project_id}/{filename} is substring-based; could be tightened.",
+    "Hard-coded magic numbers (estimated render time, semaphore=3) are reasonable but worth surfacing as env vars for tuning.",
+    "Mongo `_id` is correctly excluded in all reads via `{\"_id\": 0}` projection. Good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_sonicvision_e2e.py (new comprehensive pytest E2E suite)"
+  ],
+  "success_rate": {"backend": "100% (22/22)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "None required — no auth on this app.",
+  "seed_data_creation": "Generated a 5-second mp3 test audio at /tmp/test_short.mp3 via gTTS + imageio-ffmpeg trim. Used for all pipeline tests.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Test suite at /app/backend/tests/test_sonicvision_e2e.py covers all 19 endpoints listed in the review request and runs full E2E (~81 sec). Uses a 5-sec gTTS audio fixture at /tmp/test_short.mp3 (auto-regenerated if missing). If pipeline fails with 'Budget has been exceeded', the EMERGENT_LLM_KEY in /app/backend/.env needs refresh — this is the only blocker observed. Cleanup is built into the completed_project fixture teardown.",
+  "rca of the issue": "No outstanding bugs. The single transient failure traced to litellm reporting 'Max budget: 0.001 exceeded' for the OpenAI Whisper call. On the very next run the same key worked through the entire pipeline (transcription + 3 image gens + render + teaser) — suggesting the budget counter was reset or quota refreshed. If reproduced consistently, root cause is the key's max_budget being set too low at Emergent's billing side; mitigation is to request a higher-budget key."
+}
