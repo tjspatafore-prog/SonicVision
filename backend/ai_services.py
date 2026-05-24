@@ -1,4 +1,4 @@
-"""AI services: OpenAI Whisper STT and Gemini Nano Banana image generation."""
+"""AI services: OpenAI Whisper STT (Emergent key) and Gemini Nano Banana image generation (direct Google AI Studio key)."""
 import base64
 import io
 import os
@@ -7,11 +7,25 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PIL import Image
-from emergentintegrations.llm.chat import LlmChat, UserMessage
 from emergentintegrations.llm.openai import OpenAISpeechToText
+from google import genai
+from google.genai import types as genai_types
 
 
 EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
+GOOGLE_AI_API_KEY = os.environ.get("GOOGLE_AI_API_KEY")
+
+# Singleton Gemini client authenticated with the user's direct AI Studio key
+_gemini_client: Optional[genai.Client] = None
+
+
+def _get_gemini_client() -> genai.Client:
+    global _gemini_client
+    if _gemini_client is None:
+        if not GOOGLE_AI_API_KEY:
+            raise RuntimeError("GOOGLE_AI_API_KEY is not set — required for image generation")
+        _gemini_client = genai.Client(api_key=GOOGLE_AI_API_KEY)
+    return _gemini_client
 
 
 async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
@@ -153,19 +167,38 @@ async def generate_scene_image(
     custom_style: Optional[str] = None,
     variation_idx: int = 0,
 ) -> str:
-    """Generate one image for a lyric phrase via Gemini Nano Banana."""
-    chat = LlmChat(
-        api_key=EMERGENT_KEY,
-        session_id=f"img-{uuid.uuid4()}",
-        system_message="You are a cinematic concept artist.",
-    )
-    chat.with_model("gemini", "gemini-3.1-flash-image-preview").with_params(modalities=["image", "text"])
+    """Generate one image for a lyric phrase via Gemini Nano Banana 2 using the user's
+    direct Google AI Studio key (cost flows to the user's Google billing, NOT Emergent)."""
+    client = _get_gemini_client()
+    prompt = _build_image_prompt(lyric, style, aspect_ratio, custom_style, variation_idx)
 
-    msg = UserMessage(text=_build_image_prompt(lyric, style, aspect_ratio, custom_style, variation_idx))
-    _text, images = await chat.send_message_multimodal_response(msg)
-    if not images:
+    response = await client.aio.models.generate_content(
+        model="gemini-3.1-flash-image-preview",
+        contents=[prompt],
+        config=genai_types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+            image_config=genai_types.ImageConfig(aspect_ratio=aspect_ratio),
+        ),
+    )
+
+    # Extract first inline image from candidates -> content -> parts
+    image_bytes: Optional[bytes] = None
+    for candidate in (response.candidates or []):
+        content = getattr(candidate, "content", None)
+        if not content:
+            continue
+        for part in (content.parts or []):
+            inline = getattr(part, "inline_data", None)
+            if inline and getattr(inline, "data", None):
+                data = inline.data
+                image_bytes = base64.b64decode(data) if isinstance(data, str) else data
+                break
+        if image_bytes:
+            break
+
+    if not image_bytes:
         raise RuntimeError("Nano Banana returned no image")
-    image_bytes = base64.b64decode(images[0]["data"])
+
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     # Normalize to PNG regardless of upstream format (JPEG/PNG/WebP)
     try:
