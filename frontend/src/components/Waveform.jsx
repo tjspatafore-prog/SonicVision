@@ -45,8 +45,12 @@ export default function Waveform({ audioUrl, scenes, onSceneJump, onSceneStartCh
     return () => {
       try {
         ws.destroy();
-      } catch (_e) {
-        /* noop */
+      } catch (err) {
+        // WaveSurfer can throw during teardown if the audio is still decoding;
+        // this is benign on unmount, so we swallow it but keep a debug log.
+        if (typeof console !== "undefined" && console.debug) {
+          console.debug("[Waveform] destroy ignored:", err?.message);
+        }
       }
     };
   }, [audioUrl]);

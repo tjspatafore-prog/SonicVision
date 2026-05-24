@@ -74,7 +74,6 @@ export default function NewProject() {
       toast.success("Project created — processing started");
       navigate(`/editor/${proj.id}`);
     } catch (e) {
-      console.error(e);
       toast.error(e.response?.data?.detail || "Failed to create project");
     } finally {
       setSubmitting(false);
