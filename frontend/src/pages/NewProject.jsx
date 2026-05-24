@@ -22,6 +22,7 @@ export default function NewProject() {
   const [customStyle, setCustomStyle] = useState("");
   const [aspectRatio, setAspectRatio] = useState("16:9");
   const [resolution, setResolution] = useState("720p");
+  const [imageQuality, setImageQuality] = useState("512");
   const [burnSubtitles, setBurnSubtitles] = useState(true);
   const [dragging, setDragging] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -66,6 +67,7 @@ export default function NewProject() {
       formData.append("style", style);
       formData.append("aspect_ratio", aspectRatio);
       formData.append("resolution", resolution);
+      formData.append("image_quality", imageQuality);
       formData.append("burn_subtitles", String(burnSubtitles));
       if (style === "other") {
         formData.append("custom_style", customStyle.trim());
@@ -231,6 +233,56 @@ export default function NewProject() {
             ))}
           </div>
         </div>
+      </div>
+
+      {/* Image quality (Gemini Nano Banana cost picker) */}
+      <div className="mt-8">
+        <div className="flex items-baseline justify-between mb-2">
+          <label className="label-tracking">Image quality</label>
+          <span className="text-[11px] text-zinc-500">Directly impacts your Google bill</span>
+        </div>
+        <div
+          data-testid="image-quality-grid"
+          className="grid grid-cols-2 md:grid-cols-4 gap-2"
+        >
+          {[
+            { v: "512", label: "0.5K", res: "512×512", cost: "~$0.045", hint: "Cheapest · draft" },
+            { v: "1K", label: "1K", res: "1024×1024", cost: "~$0.067", hint: "Balanced" },
+            { v: "2K", label: "2K", res: "2048×2048", cost: "~$0.101", hint: "Sharper" },
+            { v: "4K", label: "4K", res: "4096×4096", cost: "~$0.151", hint: "Max detail" },
+          ].map((q) => (
+            <button
+              key={q.v}
+              onClick={() => setImageQuality(q.v)}
+              data-testid={`image-quality-${q.v}`}
+              className={`px-4 py-3 rounded border text-sm text-left transition-colors ${
+                imageQuality === q.v
+                  ? "border-amber-500 bg-amber-500/10 text-amber-400"
+                  : "border-zinc-800 text-zinc-300 hover:border-zinc-700"
+              }`}
+            >
+              <span className="block font-medium" style={{ fontFamily: "Outfit" }}>
+                {q.label}
+              </span>
+              <span className="block text-[10px] text-zinc-500 tracking-widest mt-0.5">
+                {q.res}
+              </span>
+              <span
+                className={`block text-[11px] tabular-nums mt-1 ${
+                  imageQuality === q.v ? "text-amber-300" : "text-zinc-400"
+                }`}
+              >
+                {q.cost}/img
+              </span>
+              <span className="block text-[10px] text-zinc-600 mt-0.5">{q.hint}</span>
+            </button>
+          ))}
+        </div>
+        <p className="text-[11px] text-zinc-600 mt-2 leading-relaxed">
+          Final video is rendered at the resolution above (720p / 1080p); image quality only
+          controls the AI-generated scene art behind each lyric. <span className="text-zinc-500">0.5K
+          is plenty for a 720p video.</span>
+        </p>
       </div>
 
       {/* Images per scene + Burn subtitles */}

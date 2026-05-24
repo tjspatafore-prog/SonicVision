@@ -166,9 +166,12 @@ async def generate_scene_image(
     aspect_ratio: str = "16:9",
     custom_style: Optional[str] = None,
     variation_idx: int = 0,
+    image_size: str = "1K",
 ) -> str:
     """Generate one image for a lyric phrase via Gemini Nano Banana 2 using the user's
-    direct Google AI Studio key (cost flows to the user's Google billing, NOT Emergent)."""
+    direct Google AI Studio key (cost flows to the user's Google billing, NOT Emergent).
+
+    image_size: "512" (cheapest ~$0.045), "1K" (~$0.067), "2K" (~$0.101), "4K" (~$0.151)."""
     client = _get_gemini_client()
     prompt = _build_image_prompt(lyric, style, aspect_ratio, custom_style, variation_idx)
 
@@ -177,7 +180,10 @@ async def generate_scene_image(
         contents=[prompt],
         config=genai_types.GenerateContentConfig(
             response_modalities=["IMAGE"],
-            image_config=genai_types.ImageConfig(aspect_ratio=aspect_ratio),
+            image_config=genai_types.ImageConfig(
+                aspect_ratio=aspect_ratio,
+                image_size=image_size,
+            ),
         ),
     )
 

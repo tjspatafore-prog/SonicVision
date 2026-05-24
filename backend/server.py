@@ -77,6 +77,7 @@ class Project(BaseModel):
     custom_style: Optional[str] = None
     aspect_ratio: str = "16:9"
     resolution: str = "720p"  # "720p" or "1080p"
+    image_quality: str = "512"  # "512", "1K", "2K", "4K" — Nano Banana image_size
     burn_subtitles: bool = True  # bake lyric text overlay into the MP4
     status: str = "created"  # created, transcribing, generating_images, rendering, completed, failed, cancelled
     progress: int = 0  # 0-100
@@ -292,6 +293,7 @@ async def _run_pipeline(project_id: str) -> None:
                             project.aspect_ratio,
                             custom_style=project.custom_style,
                             variation_idx=k,
+                            image_size=project.image_quality,
                         )
                         filenames.append(out_name)
                     scene.image_filenames = filenames
@@ -483,6 +485,7 @@ async def create_project(
     style: str = Form("cinematic"),
     aspect_ratio: str = Form("16:9"),
     resolution: str = Form("720p"),
+    image_quality: str = Form("512"),
     custom_style: str = Form(""),
     burn_subtitles: bool = Form(True),
 ):
@@ -494,6 +497,8 @@ async def create_project(
         aspect_ratio = "16:9"
     if resolution not in ("720p", "1080p"):
         resolution = "720p"
+    if image_quality not in ("512", "1K", "2K", "4K"):
+        image_quality = "512"
 
     custom = custom_style.strip() if custom_style else None
     if style == "other" and not custom:
@@ -516,6 +521,7 @@ async def create_project(
         custom_style=custom,
         aspect_ratio=aspect_ratio,
         resolution=resolution,
+        image_quality=image_quality,
         burn_subtitles=bool(burn_subtitles),
     )
     await _save_project(project)
@@ -565,6 +571,7 @@ async def regenerate_scene_image(project_id: str, idx: int, image_idx: int = 0):
             project.aspect_ratio,
             custom_style=project.custom_style,
             variation_idx=k,
+            image_size=project.image_quality,
         )
         files = list(scene.image_filenames or ([scene.image_filename] if scene.image_filename else []))
         while len(files) <= k:
