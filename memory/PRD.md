@@ -60,6 +60,17 @@ Both repos turned out to be the same product. AudioVision is the more advanced v
 - Verified all 19 endpoints requested
 - Known watch item: EMERGENT_LLM_KEY budget can be tight under sustained testing (litellm 'Max budget exceeded' once, auto-recovered)
 
+## Code review pass (2026-05)
+- Triaged 30+ findings from automated review
+- Applied 2 safe fixes:
+  - Removed `console.error(e)` in `NewProject.jsx:77` (toast already surfaces the error)
+  - Replaced empty `catch {}` in `Waveform.jsx:48` with explanatory comment + `console.debug` for benign WaveSurfer teardown errors
+- Rejected (with reasoning):
+  - `server.py:193 "exec()"` — false positive, it's `asyncio.create_subprocess_exec()` (subprocess API), not Python builtin
+  - All `is`/`==` flags — they're `is None` checks, the PEP 8-mandated idiom
+  - Exhaustive-deps complaints on Waveform/Editor/Dashboard/use-toast — intentional patterns (mount-only polling, stable setters, shadcn boilerplate); adding deps would cause re-render storms
+  - Complexity-score refactors (split Editor 531 lines / server.py 763 lines / break _run_pipeline) — risk regression on working tested code for no user benefit
+
 ## Prioritized backlog
 - P1: Frontend automated tests (we only ran backend E2E this round)
 - P2: Tighten `/api/files` path-traversal guard with `Path.resolve()` + parent-containment
