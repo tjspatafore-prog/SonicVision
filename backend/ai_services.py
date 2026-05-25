@@ -1,22 +1,28 @@
-"""AI services: OpenAI Whisper STT (Emergent key) and OpenAI gpt-image-1-mini image generation (direct OpenAI key)."""
+"""AI services:
+- Audio transcription via Gemini 2.5 Pro (direct Google AI Studio key) — better lyric accuracy + precise phrase timestamps
+- Image generation via OpenAI gpt-image-1-mini (direct OpenAI key)
+"""
+import asyncio
 import base64
 import io
+import json
 import os
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PIL import Image
-from emergentintegrations.llm.openai import OpenAISpeechToText
+from google import genai
+from google.genai import types as genai_types
 from openai import AsyncOpenAI
 
 
-EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+GOOGLE_AI_API_KEY = os.environ.get("GOOGLE_AI_API_KEY")
 
-# Singleton AsyncOpenAI client authenticated with the user's direct OpenAI key
-# (only used for image generation — Whisper stays on Emergent key above)
+# Singleton clients
 _openai_client: Optional[AsyncOpenAI] = None
+_gemini_client: Optional[genai.Client] = None
 
 
 def _get_openai_client() -> AsyncOpenAI:
@@ -28,50 +34,111 @@ def _get_openai_client() -> AsyncOpenAI:
     return _openai_client
 
 
+def _get_gemini_client() -> genai.Client:
+    global _gemini_client
+    if _gemini_client is None:
+        if not GOOGLE_AI_API_KEY:
+            raise RuntimeError("GOOGLE_AI_API_KEY is not set — required for transcription")
+        _gemini_client = genai.Client(api_key=GOOGLE_AI_API_KEY)
+    return _gemini_client
+
+
+_TRANSCRIPTION_PROMPT = """You are transcribing the LYRICS of a song with precise timing.
+
+Rules:
+- Return JSON only — no prose, no markdown fences.
+- "duration_seconds" = total length of the audio in seconds.
+- "segments" = an ordered list, one entry per sung lyric phrase or line.
+  * Each segment is a complete musical phrase as sung (typically a poetic line, 1-8 seconds).
+  * "start_seconds" and "end_seconds" are decimals (e.g., 12.34) measured from the very start of the audio.
+  * Consecutive segments should be contiguous: segment[i].end_seconds == segment[i+1].start_seconds (no gaps, no overlaps).
+  * "text" = the exact words sung in that phrase, naturally capitalized, no punctuation at the end except where it carries meaning (?, !).
+- Cover only the sung portions. Skip purely instrumental intros/outros/breaks (do not emit silent or instrumental segments).
+- For repeated choruses/refrains, transcribe each occurrence as its own segment(s) — never merge repeats into one entry.
+- Listen carefully: lyrics under heavy instrumentation should still be transcribed. Best-guess unclear words; do not insert placeholders like "[unclear]".
+- Do NOT add a leading/trailing segment that just says "Instrumental" or "Outro".
+"""
+
+
 async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
-    """Transcribe audio with segment-level timestamps using OpenAI Whisper.
+    """Transcribe singing lyrics with phrase-level timestamps via Gemini 2.5 Pro.
 
     Returns dict with 'text', 'duration', 'segments' (each with start, end, text).
     """
-    stt = OpenAISpeechToText(api_key=EMERGENT_KEY)
-    with open(audio_path, "rb") as f:
-        response = await stt.transcribe(
-            file=f,
-            model="whisper-1",
-            response_format="verbose_json",
-            timestamp_granularities=["segment"],
+    client = _get_gemini_client()
+
+    # Upload audio file (Gemini Files API; required for files > 20MB and recommended for all sizes)
+    audio_file = await client.aio.files.upload(file=audio_path)
+
+    # Wait for the upload to be ACTIVE before we can reference it
+    for _ in range(60):
+        state = getattr(audio_file.state, "name", str(audio_file.state))
+        if state == "ACTIVE":
+            break
+        if state == "FAILED":
+            raise RuntimeError(f"Audio upload failed: {audio_file}")
+        await asyncio.sleep(1)
+        audio_file = await client.aio.files.get(name=audio_file.name)
+    else:
+        raise RuntimeError("Audio file did not become ACTIVE within 60 seconds")
+
+    # Structured JSON schema so we get reliable timestamped output
+    schema = genai_types.Schema(
+        type=genai_types.Type.OBJECT,
+        properties={
+            "duration_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
+            "segments": genai_types.Schema(
+                type=genai_types.Type.ARRAY,
+                items=genai_types.Schema(
+                    type=genai_types.Type.OBJECT,
+                    properties={
+                        "start_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
+                        "end_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
+                        "text": genai_types.Schema(type=genai_types.Type.STRING),
+                    },
+                    required=["start_seconds", "end_seconds", "text"],
+                ),
+            ),
+        },
+        required=["duration_seconds", "segments"],
+    )
+
+    try:
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-pro",
+            contents=[_TRANSCRIPTION_PROMPT, audio_file],
+            config=genai_types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=schema,
+                temperature=0.1,
+            ),
         )
+    finally:
+        # Best-effort cleanup of uploaded file
+        try:
+            await client.aio.files.delete(name=audio_file.name)
+        except Exception:
+            pass
+
+    parsed = json.loads(response.text)
+    duration = float(parsed.get("duration_seconds") or 0.0)
 
     segments: List[Dict[str, Any]] = []
-    raw_segments = getattr(response, "segments", []) or []
-    for seg in raw_segments:
-        if isinstance(seg, dict):
-            start = seg.get("start")
-            end = seg.get("end")
-            text = seg.get("text")
-        else:
-            start = getattr(seg, "start", None)
-            end = getattr(seg, "end", None)
-            text = getattr(seg, "text", None)
+    for seg in parsed.get("segments", []) or []:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
         segments.append({
-            "start": float(start or 0.0),
-            "end": float(end or 0.0),
-            "text": (text or "").strip(),
+            "start": float(seg.get("start_seconds") or 0.0),
+            "end": float(seg.get("end_seconds") or 0.0),
+            "text": text,
         })
 
-    duration = getattr(response, "duration", None)
-    try:
-        duration = float(duration) if duration is not None else None
-    except (TypeError, ValueError):
-        duration = None
-    if duration is None and segments:
+    if duration <= 0 and segments:
         duration = segments[-1]["end"]
 
-    return {
-        "text": getattr(response, "text", "") or "",
-        "duration": float(duration or 0.0),
-        "segments": segments,
-    }
+    full_text = " ".join(s["text"] for s in segments)
+    return {"text": full_text, "duration": duration, "segments": segments}
 
 
 def group_segments_into_phrases(
