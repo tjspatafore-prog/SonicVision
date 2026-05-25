@@ -64,6 +64,7 @@ class Scene(BaseModel):
     image_filenames: List[str] = Field(default_factory=list)  # multi-image-per-scene
     image_status: str = "pending"  # pending, generating, completed, failed
     style_override: Optional[str] = None  # per-scene style override (preset key)
+    kind: str = "lyric"  # "lyric" | "title" | "instrumental"
 
 
 class Project(BaseModel):
@@ -79,6 +80,7 @@ class Project(BaseModel):
     resolution: str = "720p"  # "720p" or "1080p"
     image_quality: str = "low"  # "low", "medium", "high" — OpenAI gpt-image-1-mini quality
     burn_subtitles: bool = True  # bake lyric text overlay into the MP4
+    visual_concept: str = ""  # 2-4 sentence song-wide visual world, derived from audio
     status: str = "created"  # created, transcribing, generating_images, rendering, completed, failed, cancelled
     progress: int = 0  # 0-100
     error_message: Optional[str] = None
@@ -249,12 +251,61 @@ async def _run_pipeline(project_id: str) -> None:
             logger.info("[%s] Cancelled during transcription", project_id)
             return
         duration = result["duration"]
-        scenes_data = group_segments_into_phrases(
+        visual_concept = result.get("visual_concept", "")
+        lyric_groups = group_segments_into_phrases(
             result["segments"], project.phrase_grouping, duration
         )
+
+        # Build scene list with title scene + lyric scenes + instrumental scenes for gaps
+        INSTRUMENTAL_GAP = 3.0  # seconds — gaps below this stay as silence on the prior scene
+        TITLE_MIN_LEAD = 1.5    # seconds — only add a title scene if there's enough lead-in
+
+        scene_dicts: List[Dict[str, Any]] = []
+
+        # 1) Title scene from 0 -> first lyric, if there's enough lead-in
+        first_lyric_start = lyric_groups[0]["start"] if lyric_groups else 0.0
+        if lyric_groups and first_lyric_start >= TITLE_MIN_LEAD:
+            scene_dicts.append({
+                "start": 0.0,
+                "end": first_lyric_start,
+                "text": project.name,
+                "kind": "title",
+            })
+
+        # 2) Lyric scenes + instrumental scenes for any gap >= INSTRUMENTAL_GAP
+        prev_end = scene_dicts[-1]["end"] if scene_dicts else 0.0
+        for lg in lyric_groups:
+            gap = lg["start"] - prev_end
+            if gap >= INSTRUMENTAL_GAP:
+                scene_dicts.append({
+                    "start": prev_end,
+                    "end": lg["start"],
+                    "text": "",
+                    "kind": "instrumental",
+                })
+            elif gap > 0 and scene_dicts:
+                # Tiny gap — extend the previous scene end to swallow it (no visible silence)
+                scene_dicts[-1]["end"] = lg["start"]
+            scene_dicts.append({
+                "start": lg["start"],
+                "end": lg["end"],
+                "text": lg["text"],
+                "kind": "lyric",
+            })
+            prev_end = lg["end"]
+
+        # 3) Trailing instrumental if there's a sizable tail after the last lyric
+        if scene_dicts and (duration - scene_dicts[-1]["end"]) >= INSTRUMENTAL_GAP:
+            scene_dicts.append({
+                "start": scene_dicts[-1]["end"],
+                "end": duration,
+                "text": "",
+                "kind": "instrumental",
+            })
+
         scenes = [
-            Scene(idx=i, start=s["start"], end=s["end"], text=s["text"])
-            for i, s in enumerate(scenes_data)
+            Scene(idx=i, start=s["start"], end=s["end"], text=s["text"], kind=s["kind"])
+            for i, s in enumerate(scene_dicts)
         ]
 
         if not scenes:
@@ -263,11 +314,18 @@ async def _run_pipeline(project_id: str) -> None:
         await _update_fields(
             project_id,
             audio_duration=duration,
+            visual_concept=visual_concept,
             scenes=[s.model_dump() for s in scenes],
             status="generating_images",
             progress=20,
         )
-        logger.info("[%s] %d scenes. Generating images...", project_id, len(scenes))
+        logger.info(
+            "[%s] %d scenes (lyric=%d, title=%d, instrumental=%d). Generating images...",
+            project_id, len(scenes),
+            sum(1 for s in scenes if s.kind == "lyric"),
+            sum(1 for s in scenes if s.kind == "title"),
+            sum(1 for s in scenes if s.kind == "instrumental"),
+        )
 
         sem = asyncio.Semaphore(3)
         completed_count = {"n": 0}
@@ -278,7 +336,8 @@ async def _run_pipeline(project_id: str) -> None:
             async with sem:
                 if await _is_cancelled(project_id):
                     return
-                n_imgs = max(1, min(3, project.images_per_scene))
+                # Title and instrumental scenes only need 1 image — no variations needed
+                n_imgs = 1 if scene.kind != "lyric" else max(1, min(3, project.images_per_scene))
                 filenames: List[str] = []
                 try:
                     for k in range(n_imgs):
@@ -294,6 +353,9 @@ async def _run_pipeline(project_id: str) -> None:
                             custom_style=project.custom_style,
                             variation_idx=k,
                             image_size=project.image_quality,
+                            song_context=visual_concept,
+                            scene_kind=scene.kind,
+                            song_title=project.name,
                         )
                         filenames.append(out_name)
                     scene.image_filenames = filenames
@@ -572,6 +634,9 @@ async def regenerate_scene_image(project_id: str, idx: int, image_idx: int = 0):
             custom_style=project.custom_style,
             variation_idx=k,
             image_size=project.image_quality,
+            song_context=project.visual_concept,
+            scene_kind=scene.kind,
+            song_title=project.name,
         )
         files = list(scene.image_filenames or ([scene.image_filename] if scene.image_filename else []))
         while len(files) <= k:

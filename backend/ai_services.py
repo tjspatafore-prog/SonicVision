@@ -43,27 +43,35 @@ def _get_gemini_client() -> genai.Client:
     return _gemini_client
 
 
-_TRANSCRIPTION_PROMPT = """You are transcribing the LYRICS of a song with precise timing.
+_TRANSCRIPTION_PROMPT = """You are transcribing and analyzing the LYRICS of a song.
 
-Rules:
-- Return JSON only — no prose, no markdown fences.
-- "duration_seconds" = total length of the audio in seconds.
-- "segments" = an ordered list, one entry per sung lyric phrase or line.
-  * Each segment is a complete musical phrase as sung (typically a poetic line, 1-8 seconds).
-  * "start_seconds" and "end_seconds" are decimals (e.g., 12.34) measured from the very start of the audio.
-  * Consecutive segments should be contiguous: segment[i].end_seconds == segment[i+1].start_seconds (no gaps, no overlaps).
-  * "text" = the exact words sung in that phrase, naturally capitalized, no punctuation at the end except where it carries meaning (?, !).
-- Cover only the sung portions. Skip purely instrumental intros/outros/breaks (do not emit silent or instrumental segments).
-- For repeated choruses/refrains, transcribe each occurrence as its own segment(s) — never merge repeats into one entry.
-- Listen carefully: lyrics under heavy instrumentation should still be transcribed. Best-guess unclear words; do not insert placeholders like "[unclear]".
-- Do NOT add a leading/trailing segment that just says "Instrumental" or "Outro".
+OUTPUT JSON ONLY (no prose, no markdown) with these fields:
+
+1. "duration_seconds" — total audio length in seconds.
+
+2. "visual_concept" — 2-4 sentences describing the song's overall visual world that every scene image should live in.
+   Include: setting / world, era or time period, recurring metaphors or imagery, emotional mood, color/lighting palette hints.
+   This is the SINGLE most important field — it grounds every image so the music video feels like one consistent story.
+   Example: "A weary warrior in a sun-bleached desert kingdom after a long battle. Dust-caked armor, golden hour light,
+   cracked stone temples in the background. Recurring imagery of water, mercy, and surrender."
+
+3. "segments" — one entry per sung lyric phrase or line. SEGMENT RULES:
+   - Each segment is one complete sung phrase (typically 2-8 seconds, one poetic line).
+   - "start_seconds" / "end_seconds" are decimals timed precisely to when the singer STARTS and STOPS singing that phrase.
+   - IMPORTANT: end each segment when the SINGER STOPS, NOT when the next phrase begins. LEAVE GAPS where there are no lyrics
+     (instrumental breaks, silence, held notes with no words). Do not pad lyrics into instrumental sections.
+   - For repeated choruses, transcribe each occurrence as its own segments — never merge repeats.
+   - Skip purely instrumental sections (do NOT emit empty/placeholder segments for them).
+   - "text" = exact words sung in that phrase, naturally capitalized, no end punctuation unless it carries meaning (?, !).
+   - Best-guess unclear words; do not insert "[unclear]" placeholders.
 """
 
 
 async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
-    """Transcribe singing lyrics with phrase-level timestamps via Gemini 2.5 Pro.
+    """Transcribe singing lyrics with phrase-level timestamps + derive a song-wide visual concept,
+    in a single Gemini 2.5 Pro call.
 
-    Returns dict with 'text', 'duration', 'segments' (each with start, end, text).
+    Returns dict with 'text', 'duration', 'segments' (each with start, end, text), and 'visual_concept'.
     """
     client = _get_gemini_client()
 
@@ -82,11 +90,12 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
     else:
         raise RuntimeError("Audio file did not become ACTIVE within 60 seconds")
 
-    # Structured JSON schema so we get reliable timestamped output
+    # Structured JSON schema so we get reliable timestamped output + visual concept
     schema = genai_types.Schema(
         type=genai_types.Type.OBJECT,
         properties={
             "duration_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
+            "visual_concept": genai_types.Schema(type=genai_types.Type.STRING),
             "segments": genai_types.Schema(
                 type=genai_types.Type.ARRAY,
                 items=genai_types.Schema(
@@ -100,7 +109,7 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
                 ),
             ),
         },
-        required=["duration_seconds", "segments"],
+        required=["duration_seconds", "visual_concept", "segments"],
     )
 
     try:
@@ -122,6 +131,7 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
 
     parsed = json.loads(response.text)
     duration = float(parsed.get("duration_seconds") or 0.0)
+    visual_concept = (parsed.get("visual_concept") or "").strip()
 
     segments: List[Dict[str, Any]] = []
     for seg in parsed.get("segments", []) or []:
@@ -138,7 +148,12 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
         duration = segments[-1]["end"]
 
     full_text = " ".join(s["text"] for s in segments)
-    return {"text": full_text, "duration": duration, "segments": segments}
+    return {
+        "text": full_text,
+        "duration": duration,
+        "segments": segments,
+        "visual_concept": visual_concept,
+    }
 
 
 def group_segments_into_phrases(
@@ -146,7 +161,12 @@ def group_segments_into_phrases(
     phrases_per_scene: int,
     total_duration: float,
 ) -> List[Dict[str, Any]]:
-    """Group Whisper segments into scenes. Each scene contains N consecutive segments."""
+    """Group lyric segments into N-phrase scenes.
+
+    Preserves the REAL start/end of each sung phrase so the caller can detect gaps
+    (instrumental breaks) and insert non-lyric scenes for them. total_duration is
+    used by the caller, not here.
+    """
     if not segments:
         return []
 
@@ -161,12 +181,6 @@ def group_segments_into_phrases(
         if text:
             scenes.append({"start": start, "end": end, "text": text})
         i += n
-
-    # Make scenes contiguous: each scene ends where the next begins
-    for idx in range(len(scenes) - 1):
-        scenes[idx]["end"] = scenes[idx + 1]["start"]
-    if scenes:
-        scenes[-1]["end"] = max(scenes[-1]["end"], total_duration)
 
     return scenes
 
@@ -190,12 +204,17 @@ STYLE_PRESETS = {
 }
 
 
+
+
 def _build_image_prompt(
     lyric: str,
     style: str = "cinematic",
     aspect_ratio: str = "16:9",
     custom_style: Optional[str] = None,
     variation_idx: int = 0,
+    song_context: str = "",
+    scene_kind: str = "lyric",
+    song_title: str = "",
 ) -> str:
     if style == "other" and custom_style:
         style_suffix = custom_style.strip()
@@ -217,12 +236,41 @@ def _build_image_prompt(
         if variation_idx > 0
         else ""
     )
+
+    context_block = (
+        f"OVERALL SONG WORLD (every scene MUST live in this exact world for visual continuity): {song_context}\n\n"
+        if song_context else ""
+    )
+
+    if scene_kind == "title":
+        subject_block = (
+            "This is the OPENING TITLE SHOT for a music video"
+            + (f' titled "{song_title}"' if song_title else "")
+            + ". Render an evocative establishing shot that introduces the world of the song. "
+            "Do NOT include any text, song titles, or letters in the image — just an iconic, "
+            "atmospheric scene that sets the tone."
+        )
+    elif scene_kind == "instrumental":
+        subject_block = (
+            "This is an INSTRUMENTAL BRIDGE moment with no lyrics. Render an atmospheric scene that "
+            "naturally bridges two narrative moments in the song's world. Capture the mood and motion "
+            "without depicting a specific lyric or quote."
+        )
+    else:
+        subject_block = (
+            f'Scene illustrating the sung lyric: "{lyric}". '
+            "Render the lyric INSIDE the song's world above — not as a literal generic image. "
+            "If the lyric mentions a common object (e.g. 'a glass of water'), place it in the world "
+            "(e.g. a battlefield, not a kitchen)."
+        )
+
     return (
-        f"Scene representing the song lyric: \"{lyric}\". "
+        f"{context_block}"
+        f"{subject_block} "
         f"Style: {style_suffix}. "
         f"Composition: {composition}.{variation_hint} "
-        "No text, no captions, no watermarks, no logos, no subtitles. "
-        "Focus on mood, scenery, and symbolism that matches the lyric."
+        "Absolutely no text, captions, watermarks, logos, subtitles, or written words anywhere in the image. "
+        "Focus on mood, scenery, characters, and symbolism."
     )
 
 
@@ -234,16 +282,23 @@ async def generate_scene_image(
     custom_style: Optional[str] = None,
     variation_idx: int = 0,
     image_size: str = "low",
+    song_context: str = "",
+    scene_kind: str = "lyric",
+    song_title: str = "",
 ) -> str:
-    """Generate one image for a lyric phrase via OpenAI gpt-image-1-mini using the user's
-    direct OpenAI key (cost flows to the user's OpenAI billing, NOT Emergent).
+    """Generate one image via OpenAI gpt-image-1-mini using the user's direct OpenAI key.
 
     image_size: OpenAI quality tier — "low" (~$0.005-0.006/img), "medium" (~$0.011-0.015/img),
-                "high" (~$0.036-0.052/img). Default "low" = cheapest tier."""
+                "high" (~$0.036-0.052/img). Default "low" = cheapest tier.
+    scene_kind: "lyric" | "title" | "instrumental" — controls the prompt framing.
+    song_context: 2-4 sentence song-wide visual concept used to anchor every image.
+    """
     client = _get_openai_client()
-    prompt = _build_image_prompt(lyric, style, aspect_ratio, custom_style, variation_idx)
+    prompt = _build_image_prompt(
+        lyric, style, aspect_ratio, custom_style, variation_idx,
+        song_context=song_context, scene_kind=scene_kind, song_title=song_title,
+    )
 
-    # Map our app's aspect ratio to OpenAI's supported sizes
     size = "1536x1024" if aspect_ratio == "16:9" else "1024x1536"
     quality = image_size if image_size in ("low", "medium", "high", "auto") else "low"
 
@@ -261,7 +316,6 @@ async def generate_scene_image(
     image_bytes = base64.b64decode(response.data[0].b64_json)
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    # Normalize to PNG regardless of upstream format
     try:
         img = Image.open(io.BytesIO(image_bytes))
         if img.mode != "RGB":

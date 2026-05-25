@@ -161,7 +161,7 @@ def _make_ken_burns_clip(image_path: str, duration: float, idx: int, video_w: in
 
     clip = base.resize(resize_fn).set_position(pos_fn)
     composed = CompositeVideoClip([clip], size=(video_w, video_h)).set_duration(duration)
-    composed = composed.crossfadein(0.4)
+    composed = composed.crossfadein(0.6)
     return composed
 
 
@@ -177,7 +177,7 @@ def _scene_video(image_paths: List[str], duration: float, idx: int, video_w: int
     for k, img_path in enumerate(image_paths):
         kb = _make_ken_burns_clip(img_path, sub_dur, idx * 7 + k, video_w, video_h)
         sub_clips.append(kb)
-    return concatenate_videoclips(sub_clips, method="compose", padding=-0.4)
+    return concatenate_videoclips(sub_clips, method="compose", padding=-0.6)
 
 
 def render_video(
@@ -220,7 +220,7 @@ def render_video(
     if not clips:
         raise RuntimeError("No scenes to render")
 
-    video = concatenate_videoclips(clips, method="compose", padding=-0.4)
+    video = concatenate_videoclips(clips, method="compose", padding=-0.6)
     audio = AudioFileClip(audio_path)
     final_duration = min(video.duration, audio.duration)
     video = video.set_duration(final_duration).set_audio(audio.subclip(0, final_duration))
