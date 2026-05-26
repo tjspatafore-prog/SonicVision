@@ -71,6 +71,19 @@ Both repos turned out to be the same product. AudioVision is the more advanced v
   - Exhaustive-deps complaints on Waveform/Editor/Dashboard/use-toast — intentional patterns (mount-only polling, stable setters, shadcn boilerplate); adding deps would cause re-render storms
   - Complexity-score refactors (split Editor 531 lines / server.py 763 lines / break _run_pipeline) — risk regression on working tested code for no user benefit
 
+## Iteration 2 (2026-05) — Pipeline upgrades
+- **Image gen:** swapped from Gemini Nano Banana (~$0.045/img at 0.5K) to **OpenAI gpt-image-1-mini** at "Low" quality (~$0.006/img) using the user's direct OpenAI key → ~7× cheaper per song
+- **Transcription:** swapped Whisper → **Gemini 2.5 Pro audio** with structured JSON output (uses user's Google AI Studio key, ~$0.01/song) → far better accuracy on sung lyrics + decimal-second timestamps (~10ms precision vs Whisper's 1s buckets)
+- **Song-wide visual context:** Gemini 2.5 Pro now also returns a 2-4 sentence `visual_concept` for the whole song; every image prompt is anchored in that world so a "glass of water" in a battle song is rendered on a battlefield, not a kitchen
+- **Title scene + instrumental scenes:** pipeline inserts a `kind="title"` scene for the lead-in (0 → first lyric ≥1.5s) and `kind="instrumental"` scenes for any gap ≥3s between sung phrases — lyrics no longer extend into silence
+
+## Iteration 3 (2026-05) — Editor polish
+- **Fade-to-black between scenes fixed:** crossfadein moved from inner Ken-Burns clip to outer scene composite so its alpha mask propagates correctly through the text-overlay wrapper. Scene→scene transitions are now smooth.
+- **Live lyric overlay (no re-render):** new `LiveLyricOverlay` component renders the current scene's lyric on top of the video in React. Users can change font, size, color, position, shadow opacity, shadow blur freely and see changes instantly — no MP4 re-render needed. Pipeline now ALWAYS renders a clean MP4 by default.
+- **Bake & download flow:** new big amber CTA "Bake lyrics into MP4 & download" sets `burn_subtitles=true`, triggers a re-render, polls until completed, then auto-downloads the burned MP4. Existing "Re-render" button + burn toggle kept as advanced options.
+- **12 bundled fonts:** Anton, Bebas Neue, Caveat, Cinzel, Lobster, Montserrat (default), Outfit, Oswald, Pacifico, Permanent Marker, Playfair Display, Roboto. `/api/fonts` endpoint lists them; frontend loads matching Google Fonts CSS for the live preview, backend uses bundled TTFs (in `/app/backend/fonts/`) for the burn-in render.
+- **`last_render_burn_subtitles` field** on Project tracks whether the current MP4 has lyrics burned — frontend uses it to decide whether to draw the live overlay (avoids double-text for already-burned MP4s).
+
 ## Prioritized backlog
 - P1: Frontend automated tests (we only ran backend E2E this round)
 - P2: Tighten `/api/files` path-traversal guard with `Path.resolve()` + parent-containment

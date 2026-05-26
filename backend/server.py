@@ -51,7 +51,25 @@ DEFAULT_OVERLAY = {
     "shadow_opacity": 0.55,
     "shadow_blur": 12,
     "text_position": "center",
+    "font_family": "Montserrat",
 }
+
+# Fonts available for the lyric overlay. Frontend loads these via Google Fonts CSS;
+# backend renders the burn-in using bundled TTF files in /app/backend/fonts/.
+AVAILABLE_FONTS = [
+    {"key": "Montserrat",       "google_family": "Montserrat:wght@700",        "category": "Modern Sans"},
+    {"key": "Outfit",           "google_family": "Outfit:wght@600",            "category": "Modern Sans"},
+    {"key": "Roboto",           "google_family": "Roboto:wght@700",            "category": "Modern Sans"},
+    {"key": "Anton",            "google_family": "Anton",                      "category": "Display"},
+    {"key": "Bebas Neue",       "google_family": "Bebas+Neue",                 "category": "Display"},
+    {"key": "Oswald",           "google_family": "Oswald:wght@700",            "category": "Display"},
+    {"key": "Playfair Display", "google_family": "Playfair+Display:wght@700",  "category": "Serif"},
+    {"key": "Cinzel",           "google_family": "Cinzel:wght@700",            "category": "Serif"},
+    {"key": "Lobster",          "google_family": "Lobster",                    "category": "Script"},
+    {"key": "Pacifico",         "google_family": "Pacifico",                   "category": "Script"},
+    {"key": "Caveat",           "google_family": "Caveat:wght@700",            "category": "Handwritten"},
+    {"key": "Permanent Marker", "google_family": "Permanent+Marker",           "category": "Handwritten"},
+]
 
 
 # ---------- Models ----------
@@ -79,7 +97,8 @@ class Project(BaseModel):
     aspect_ratio: str = "16:9"
     resolution: str = "720p"  # "720p" or "1080p"
     image_quality: str = "low"  # "low", "medium", "high" — OpenAI gpt-image-1-mini quality
-    burn_subtitles: bool = True  # bake lyric text overlay into the MP4
+    burn_subtitles: bool = False  # bake lyric text overlay into the MP4 — initial pipeline always renders clean; user can toggle this on and re-render to bake
+    last_render_burn_subtitles: bool = False  # what the most recent successful render used (so frontend knows whether to show its live overlay)
     visual_concept: str = ""  # 2-4 sentence song-wide visual world, derived from audio
     status: str = "created"  # created, transcribing, generating_images, rendering, completed, failed, cancelled
     progress: int = 0  # 0-100
@@ -101,6 +120,7 @@ class OverlayUpdate(BaseModel):
     shadow_opacity: Optional[float] = None
     shadow_blur: Optional[int] = None
     text_position: Optional[str] = None
+    font_family: Optional[str] = None
 
 
 class SceneUpdate(BaseModel):
@@ -412,7 +432,7 @@ async def _run_pipeline(project_id: str) -> None:
             project.audio_duration,
             project.aspect_ratio,
             project.resolution,
-            project.burn_subtitles,
+            False,  # initial pipeline ALWAYS renders clean — user iterates on the live overlay in the editor and re-renders to bake
         )
 
         srt_name = "subtitles.srt"
@@ -426,6 +446,7 @@ async def _run_pipeline(project_id: str) -> None:
             project_id,
             video_filename=video_name,
             srt_filename=srt_name,
+            last_render_burn_subtitles=False,
             status="completed",
             progress=100,
         )
@@ -485,6 +506,7 @@ async def _render_only(project_id: str) -> None:
             project_id,
             video_filename=video_name,
             srt_filename=srt_name,
+            last_render_burn_subtitles=bool(project.burn_subtitles),
             status="completed",
             progress=100,
         )
@@ -524,6 +546,12 @@ async def get_style_presets():
     ]
 
 
+@api_router.get("/fonts")
+async def list_fonts():
+    """List fonts available for the lyric overlay (matched between FE preview and BE burn-in)."""
+    return AVAILABLE_FONTS
+
+
 @api_router.post("/projects/{project_id}/cancel", response_model=Project)
 async def cancel_project(project_id: str):
     project = await _get_project(project_id)
@@ -549,7 +577,7 @@ async def create_project(
     resolution: str = Form("720p"),
     image_quality: str = Form("low"),
     custom_style: str = Form(""),
-    burn_subtitles: bool = Form(True),
+    burn_subtitles: bool = Form(False),
 ):
     ext = Path(audio.filename or "").suffix.lower()
     if ext not in ALLOWED_AUDIO_EXT:

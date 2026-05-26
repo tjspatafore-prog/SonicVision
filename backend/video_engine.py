@@ -34,7 +34,30 @@ def _video_size(aspect_ratio: str = "16:9", resolution: str = "720p") -> Tuple[i
     return (720, 1280) if aspect_ratio == "9:16" else (1280, 720)
 
 
-def _font_path() -> str:
+# Bundled Google Fonts for the lyric overlay. Frontend lists the same names via /api/fonts.
+FONTS_DIR = Path(__file__).parent / "fonts"
+FONT_MAP: Dict[str, str] = {
+    "Outfit":           str(FONTS_DIR / "Montserrat.ttf"),  # similar geometric sans fallback
+    "Montserrat":       str(FONTS_DIR / "Montserrat.ttf"),
+    "Anton":            str(FONTS_DIR / "Anton.ttf"),
+    "Bebas Neue":       str(FONTS_DIR / "BebasNeue.ttf"),
+    "Oswald":           str(FONTS_DIR / "Oswald.ttf"),
+    "Playfair Display": str(FONTS_DIR / "PlayfairDisplay.ttf"),
+    "Cinzel":           str(FONTS_DIR / "Cinzel.ttf"),
+    "Lobster":          str(FONTS_DIR / "Lobster.ttf"),
+    "Pacifico":         str(FONTS_DIR / "Pacifico.ttf"),
+    "Caveat":           str(FONTS_DIR / "Caveat.ttf"),
+    "Permanent Marker": str(FONTS_DIR / "PermanentMarker.ttf"),
+    "Roboto":           str(FONTS_DIR / "Roboto.ttf"),
+}
+DEFAULT_OVERLAY_FONT = "Montserrat"
+
+
+def _font_path(family: str = "") -> str:
+    """Resolve a font family name to an existing TTF path (with sensible fallback)."""
+    path = FONT_MAP.get(family) or FONT_MAP.get(DEFAULT_OVERLAY_FONT)
+    if path and os.path.exists(path):
+        return path
     return FONT_REGULAR if os.path.exists(FONT_REGULAR) else FONT_FALLBACK
 
 
@@ -75,11 +98,12 @@ def _render_text_overlay_image(
     shadow_opacity = float(overlay_style.get("shadow_opacity", 0.55))
     shadow_blur = int(overlay_style.get("shadow_blur", 12))
     position = overlay_style.get("text_position", "center")
+    font_family = overlay_style.get("font_family", DEFAULT_OVERLAY_FONT)
 
     color_rgb = _hex_to_rgb(color_hex)
 
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    font = ImageFont.truetype(_font_path(), font_size)
+    font = ImageFont.truetype(_font_path(font_family), font_size)
 
     max_text_width = int(width * 0.85)
     lines = _wrap_text(text, font, max_text_width)
@@ -161,7 +185,9 @@ def _make_ken_burns_clip(image_path: str, duration: float, idx: int, video_w: in
 
     clip = base.resize(resize_fn).set_position(pos_fn)
     composed = CompositeVideoClip([clip], size=(video_w, video_h)).set_duration(duration)
-    composed = composed.crossfadein(0.6)
+    # NOTE: crossfade is applied at the OUTER scene composite (in render_video) so its alpha
+    # mask propagates through the text-overlay wrapping. Applying it here caused the visible
+    # "fade to black" between scenes because the outer composite had no alpha ramp.
     return composed
 
 
@@ -176,8 +202,10 @@ def _scene_video(image_paths: List[str], duration: float, idx: int, video_w: int
     sub_clips = []
     for k, img_path in enumerate(image_paths):
         kb = _make_ken_burns_clip(img_path, sub_dur, idx * 7 + k, video_w, video_h)
+        if k > 0:
+            kb = kb.crossfadein(0.4)
         sub_clips.append(kb)
-    return concatenate_videoclips(sub_clips, method="compose", padding=-0.6)
+    return concatenate_videoclips(sub_clips, method="compose", padding=-0.4)
 
 
 def render_video(
@@ -215,6 +243,11 @@ def render_video(
             composite = CompositeVideoClip(
                 [base_clip], size=(video_w, video_h)
             ).set_duration(duration)
+        # Apply scene-to-scene crossfade on the OUTER composite so its alpha mask
+        # propagates correctly during the 0.6s overlap with the previous scene.
+        # (Skip on the very first scene — let it open at full opacity.)
+        if idx > 0:
+            composite = composite.crossfadein(0.6)
         clips.append(composite)
 
     if not clips:

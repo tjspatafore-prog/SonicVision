@@ -1,4 +1,6 @@
 import { Slider } from "@/components/ui/slider";
+import { useEffect, useState } from "react";
+import { listFonts } from "@/lib/api";
 
 const COLORS = ["#FFFFFF", "#F59E0B", "#FCD34D", "#FB7185", "#60A5FA", "#34D399", "#000000"];
 const POSITIONS = [
@@ -7,11 +9,56 @@ const POSITIONS = [
   { v: "bottom", l: "Bottom" },
 ];
 
+const FALLBACK_FONTS = [
+  { key: "Montserrat", category: "Modern Sans" },
+  { key: "Outfit", category: "Modern Sans" },
+  { key: "Anton", category: "Display" },
+  { key: "Bebas Neue", category: "Display" },
+  { key: "Playfair Display", category: "Serif" },
+  { key: "Lobster", category: "Script" },
+];
+
 export default function OverlayControls({ style, onChange }) {
+  const [fonts, setFonts] = useState(FALLBACK_FONTS);
+
+  useEffect(() => {
+    listFonts().then(setFonts).catch(() => {});
+  }, []);
+
   const set = (key, value) => onChange({ ...style, [key]: value });
+  const currentFont = style.font_family || "Montserrat";
 
   return (
     <div className="space-y-6">
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <span className="label-tracking">Font</span>
+          <span
+            className="text-xs text-zinc-500 truncate ml-2 max-w-[60%] text-right"
+            style={{ fontFamily: `"${currentFont}", "Outfit", sans-serif` }}
+          >
+            {currentFont}
+          </span>
+        </div>
+        <select
+          data-testid="font-family-select"
+          value={currentFont}
+          onChange={(e) => set("font_family", e.target.value)}
+          className="w-full bg-[#0a0a0a] border border-zinc-800 rounded px-3 py-2 text-sm text-zinc-200 focus:border-amber-500 focus:outline-none"
+          style={{ fontFamily: `"${currentFont}", "Outfit", sans-serif` }}
+        >
+          {fonts.map((f) => (
+            <option
+              key={f.key}
+              value={f.key}
+              style={{ fontFamily: `"${f.key}", sans-serif` }}
+            >
+              {f.key} {f.category ? `— ${f.category}` : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+
       <div>
         <div className="flex items-center justify-between mb-2">
           <span className="label-tracking">Font size</span>

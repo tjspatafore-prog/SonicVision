@@ -21,6 +21,7 @@ import TimelineScene from "@/components/TimelineScene";
 import OverlayControls from "@/components/OverlayControls";
 import SceneEditDialog from "@/components/SceneEditDialog";
 import Waveform from "@/components/Waveform";
+import LiveLyricOverlay from "@/components/LiveLyricOverlay";
 import { toast } from "sonner";
 import {
   Download,
@@ -32,6 +33,7 @@ import {
   Ban,
   Share2,
   Sparkles,
+  Flame,
 } from "lucide-react";
 
 function getActiveSceneIdx(scenes, t) {
@@ -52,6 +54,7 @@ export default function Editor() {
   const [rerendering, setRerendering] = useState(false);
   const [previewTime, setPreviewTime] = useState(0);
   const [editingScene, setEditingScene] = useState(null);
+  const [baking, setBaking] = useState(false);
   const videoRef = useRef(null);
   const overlaySaveTimer = useRef(null);
 
@@ -113,23 +116,22 @@ export default function Editor() {
   const isCompleted = project.status === "completed";
   const videoSrc = project.video_filename ? fileUrl(project.id, project.video_filename) : null;
   const isVertical = project.aspect_ratio === "9:16";
+  const baseVideoHeight = isVertical ? 1280 : 720;
   const styleMeta = presetByKey(project.style);
   const previewScene = project.scenes[activeIdx];
   const previewImage = previewScene?.image_filename
     ? fileUrl(project.id, previewScene.image_filename)
     : null;
+  // The rendered MP4 has lyrics burned in only if last_render_burn_subtitles is true.
+  // Otherwise we always paint the live React overlay on top so the user can iterate freely.
+  // Fallback to project.burn_subtitles for projects rendered before that field existed
+  // (so old burned MP4s don't show double lyrics).
+  const renderHasBurned =
+    project.last_render_burn_subtitles ??
+    (project.burn_subtitles ? true : false);
+  const showLiveOverlay = !renderHasBurned;
 
   const textPos = overlayDraft.text_position || "center";
-  const previewTextStyle = {
-    fontSize: `${(overlayDraft.font_size / 720) * 100}%`,
-    color: overlayDraft.font_color,
-    textShadow: `0 0 ${overlayDraft.shadow_blur}px rgba(0,0,0,${overlayDraft.shadow_opacity}), 0 0 ${overlayDraft.shadow_blur / 2}px rgba(0,0,0,${overlayDraft.shadow_opacity})`,
-    fontFamily: "Outfit, sans-serif",
-    fontWeight: 600,
-    textAlign: "center",
-    lineHeight: 1.2,
-    padding: "0 8%",
-  };
 
   const onOverlayChange = (next) => {
     setOverlayDraft(next);
@@ -214,6 +216,50 @@ export default function Editor() {
       );
     } catch {
       toast.error("Could not update setting");
+    }
+  };
+
+  // Bake lyrics into the MP4 (re-render with burn=ON) then trigger download
+  const handleBakeAndDownload = async () => {
+    if (baking) return;
+    setBaking(true);
+    try {
+      // Ensure any pending overlay edits are flushed first
+      if (overlaySaveTimer.current) {
+        clearTimeout(overlaySaveTimer.current);
+        overlaySaveTimer.current = null;
+        await updateOverlay(id, overlayDraft);
+      }
+      await setBurnSubtitles(id, true);
+      await triggerRender(id);
+      toast.message("Baking lyrics into the MP4… this can take a few minutes.");
+
+      // Poll until done (max ~15 min)
+      let p = project;
+      const start = Date.now();
+      while (Date.now() - start < 15 * 60 * 1000) {
+        await new Promise((r) => setTimeout(r, 4000));
+        p = await getProject(id);
+        setProject(p);
+        if (p.status === "completed") break;
+        if (p.status === "failed" || p.status === "cancelled") {
+          throw new Error(p.error_message || `Render ${p.status}`);
+        }
+      }
+      if (p.status !== "completed") throw new Error("Render timed out");
+
+      // Trigger the browser download
+      const a = document.createElement("a");
+      a.href = downloadVideoUrl(id);
+      a.download = `${project.name}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      toast.success("Done! Your MP4 with burned lyrics is downloading.");
+    } catch (e) {
+      toast.error(e.message || "Bake failed");
+    } finally {
+      setBaking(false);
     }
   };
 
@@ -372,35 +418,34 @@ export default function Editor() {
             style={isVertical ? { maxWidth: "min(100%, 420px)" } : undefined}
           >
             {isCompleted && videoSrc ? (
-              <video
-                ref={videoRef}
-                key={`${project.id}-${project.updated_at}`}
-                src={videoSrc}
-                controls
-                data-testid="video-player"
-                className="w-full h-full object-contain bg-black"
-              />
+              <>
+                <video
+                  ref={videoRef}
+                  key={`${project.id}-${project.updated_at}`}
+                  src={videoSrc}
+                  controls
+                  data-testid="video-player"
+                  className="w-full h-full object-contain bg-black"
+                />
+                {showLiveOverlay && (
+                  <LiveLyricOverlay
+                    scenes={project.scenes}
+                    currentTime={previewTime}
+                    style={overlayDraft}
+                    baseVideoHeight={baseVideoHeight}
+                    showInstrumentalHint
+                  />
+                )}
+              </>
             ) : previewImage ? (
               <>
                 <img src={previewImage} alt="" className="w-full h-full object-cover" />
-                {project.burn_subtitles && (
-                  <div
-                    className={`absolute inset-0 flex ${
-                      textPos === "top"
-                        ? "items-start pt-8"
-                        : textPos === "bottom"
-                        ? "items-end pb-12"
-                        : "items-center"
-                    } justify-center pointer-events-none`}
-                  >
-                    <div
-                      style={previewTextStyle}
-                      className={isVertical ? "text-3xl sm:text-4xl" : "text-5xl sm:text-6xl"}
-                    >
-                      {previewScene?.text || ""}
-                    </div>
-                  </div>
-                )}
+                <LiveLyricOverlay
+                  scenes={project.scenes}
+                  currentTime={previewScene?.start || 0}
+                  style={overlayDraft}
+                  baseVideoHeight={baseVideoHeight}
+                />
               </>
             ) : (
               <div className="w-full h-full flex items-center justify-center text-zinc-700">
@@ -423,9 +468,32 @@ export default function Editor() {
             <OverlayControls style={overlayDraft} onChange={onOverlayChange} />
 
             <div className="mt-5 pt-5 border-t border-zinc-800/80 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="label-tracking flex items-center gap-1.5">
-                  <Subtitles className="w-3 h-3" /> Burn subtitles
+              <button
+                onClick={handleBakeAndDownload}
+                disabled={baking || rerendering || !isCompleted}
+                data-testid="bake-and-download-btn"
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded bg-amber-500 hover:bg-amber-400 text-black font-medium text-sm transition-colors disabled:opacity-40"
+              >
+                {baking ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Flame className="w-4 h-4" />
+                )}
+                {baking
+                  ? "Baking…"
+                  : project.last_render_burn_subtitles
+                  ? "Re-bake with current style & download"
+                  : "Bake lyrics into MP4 & download"}
+              </button>
+              <p className="text-[11px] text-zinc-500 leading-relaxed">
+                {project.last_render_burn_subtitles
+                  ? "Your MP4 currently has lyrics burned in. Tweak the style above and click to re-bake."
+                  : "Lyrics shown over the preview are LIVE — change font, size, color, or position freely. Click above only when you want them permanently embedded into the downloadable MP4."}
+              </p>
+
+              <div className="flex items-center justify-between pt-3 border-t border-zinc-800/60">
+                <span className="label-tracking flex items-center gap-1.5 text-zinc-500">
+                  <Subtitles className="w-3 h-3" /> Next render bakes lyrics
                 </span>
                 <button
                   onClick={handleToggleBurn}
@@ -433,6 +501,7 @@ export default function Editor() {
                   className={`relative inline-block w-9 h-5 rounded-full transition-colors ${
                     project.burn_subtitles ? "bg-amber-500" : "bg-zinc-700"
                   }`}
+                  title="Controls what a manual Re-render produces"
                 >
                   <span
                     className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-black transition-transform ${
@@ -441,18 +510,10 @@ export default function Editor() {
                   />
                 </button>
               </div>
-              <p className="text-[11px] text-zinc-500 leading-relaxed">
-                When on, lyrics are baked into the MP4 using the styling above. SRT sidecar is
-                always exported either way.
+              <p className="text-[10px] text-zinc-600 leading-relaxed">
+                SRT sidecar is always exported either way.
               </p>
             </div>
-
-            {isCompleted && (
-              <p className="mt-5 text-[11px] text-zinc-500 leading-relaxed">
-                Click <span className="text-amber-400">Re-render</span> above to bake any changes
-                into the MP4.
-              </p>
-            )}
           </div>
 
           {/* Teaser panel */}
