@@ -9,6 +9,12 @@ const POSITIONS = [
   { v: "bottom", l: "Bottom" },
 ];
 
+const LYRIC_MODES = [
+  { v: "phrase", l: "Phrase", hint: "Whole line shown together" },
+  { v: "karaoke", l: "Karaoke", hint: "Current word highlights as sung" },
+  { v: "kinetic", l: "Kinetic", hint: "Words appear as they're sung" },
+];
+
 const FALLBACK_FONTS = [
   { key: "Montserrat", category: "Modern Sans" },
   { key: "Outfit", category: "Modern Sans" },
@@ -27,9 +33,35 @@ export default function OverlayControls({ style, onChange }) {
 
   const set = (key, value) => onChange({ ...style, [key]: value });
   const currentFont = style.font_family || "Montserrat";
+  const lyricMode = style.lyric_mode || "phrase";
+  const highlightColor = style.highlight_color || "#FCD34D";
 
   return (
     <div className="space-y-6">
+      <div>
+        <span className="label-tracking block mb-2">Lyric mode</span>
+        <div className="grid grid-cols-3 gap-2" data-testid="lyric-mode-grid">
+          {LYRIC_MODES.map((m) => (
+            <button
+              key={m.v}
+              onClick={() => set("lyric_mode", m.v)}
+              data-testid={`lyric-mode-${m.v}`}
+              title={m.hint}
+              className={`px-2 py-2 rounded border text-xs transition-colors ${
+                lyricMode === m.v
+                  ? "border-amber-500 bg-amber-500/10 text-amber-400"
+                  : "border-zinc-800 text-zinc-400 hover:border-zinc-700"
+              }`}
+            >
+              {m.l}
+            </button>
+          ))}
+        </div>
+        <p className="text-[10px] text-zinc-600 mt-1.5">
+          {LYRIC_MODES.find((m) => m.v === lyricMode)?.hint}
+        </p>
+      </div>
+
       <div>
         <div className="flex items-center justify-between mb-2">
           <span className="label-tracking">Font</span>
@@ -123,6 +155,29 @@ export default function OverlayControls({ style, onChange }) {
           ))}
         </div>
       </div>
+
+      {lyricMode === "karaoke" && (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="label-tracking">Karaoke highlight color</span>
+            <span className="text-[10px] text-zinc-600 tabular-nums">{highlightColor}</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {COLORS.map((c) => (
+              <button
+                key={c}
+                onClick={() => set("highlight_color", c)}
+                data-testid={`hl-color-${c}`}
+                className={`w-7 h-7 rounded-full border-2 transition-transform hover:scale-110 ${
+                  highlightColor === c ? "border-amber-500" : "border-zinc-800"
+                }`}
+                style={{ backgroundColor: c }}
+                title={c}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       <div>
         <span className="label-tracking block mb-2">Text position</span>

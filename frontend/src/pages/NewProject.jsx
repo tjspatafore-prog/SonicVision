@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { createProject } from "@/lib/api";
+import { createProject, createProjectFromUrl } from "@/lib/api";
 import { STYLE_PRESETS } from "@/lib/stylePresets";
 import { toast } from "sonner";
 import {
@@ -11,10 +11,13 @@ import {
   Monitor,
   Smartphone,
   Subtitles,
+  Link2,
 } from "lucide-react";
 
 export default function NewProject() {
+  const [source, setSource] = useState("upload"); // "upload" | "url"
   const [file, setFile] = useState(null);
+  const [url, setUrl] = useState("");
   const [name, setName] = useState("");
   const [grouping, setGrouping] = useState(1);
   const [imagesPerScene, setImagesPerScene] = useState(1);
@@ -23,7 +26,7 @@ export default function NewProject() {
   const [aspectRatio, setAspectRatio] = useState("16:9");
   const [resolution, setResolution] = useState("720p");
   const [imageQuality, setImageQuality] = useState("low");
-  const [burnSubtitles, setBurnSubtitles] = useState(true);
+  const [burnSubtitles, setBurnSubtitles] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const inputRef = useRef(null);
@@ -52,27 +55,51 @@ export default function NewProject() {
   };
 
   const onSubmit = async () => {
-    if (!file) return toast.error("Please select an audio file");
-    if (!name.trim()) return toast.error("Please enter a project name");
+    if (source === "upload") {
+      if (!file) return toast.error("Please select an audio file");
+    } else {
+      if (!url.trim()) return toast.error("Paste a URL to import");
+      if (!/^https?:\/\//i.test(url.trim())) {
+        return toast.error("URL must start with http:// or https://");
+      }
+    }
+    if (source === "upload" && !name.trim()) {
+      return toast.error("Please enter a project name");
+    }
     if (style === "other" && !customStyle.trim()) {
       return toast.error("Describe your custom style or pick a preset");
     }
     setSubmitting(true);
     try {
-      const formData = new FormData();
-      formData.append("audio", file);
-      formData.append("name", name.trim());
-      formData.append("phrase_grouping", String(grouping));
-      formData.append("images_per_scene", String(imagesPerScene));
-      formData.append("style", style);
-      formData.append("aspect_ratio", aspectRatio);
-      formData.append("resolution", resolution);
-      formData.append("image_quality", imageQuality);
-      formData.append("burn_subtitles", String(burnSubtitles));
-      if (style === "other") {
-        formData.append("custom_style", customStyle.trim());
+      let proj;
+      if (source === "upload") {
+        const formData = new FormData();
+        formData.append("audio", file);
+        formData.append("name", name.trim());
+        formData.append("phrase_grouping", String(grouping));
+        formData.append("images_per_scene", String(imagesPerScene));
+        formData.append("style", style);
+        formData.append("aspect_ratio", aspectRatio);
+        formData.append("resolution", resolution);
+        formData.append("image_quality", imageQuality);
+        formData.append("burn_subtitles", String(burnSubtitles));
+        if (style === "other") formData.append("custom_style", customStyle.trim());
+        proj = await createProject(formData);
+      } else {
+        toast.message("Fetching audio from URL…", { duration: 6000 });
+        proj = await createProjectFromUrl({
+          url: url.trim(),
+          name: name.trim() || undefined,
+          phrase_grouping: grouping,
+          images_per_scene: imagesPerScene,
+          style,
+          aspect_ratio: aspectRatio,
+          resolution,
+          image_quality: imageQuality,
+          burn_subtitles: burnSubtitles,
+          custom_style: style === "other" ? customStyle.trim() : null,
+        });
       }
-      const proj = await createProject(formData);
       toast.success("Project created — processing started");
       navigate(`/editor/${proj.id}`);
     } catch (e) {

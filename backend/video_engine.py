@@ -7,7 +7,7 @@ Supports:
 """
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -208,6 +208,172 @@ def _scene_video(image_paths: List[str], duration: float, idx: int, video_w: int
     return concatenate_videoclips(sub_clips, method="compose", padding=-0.4)
 
 
+def _render_text_overlay_with_highlight(
+    full_text: str,
+    width: int,
+    height: int,
+    overlay_style: Dict[str, Any],
+    highlight_word_idx: Optional[int] = None,
+    visible_word_count: Optional[int] = None,
+) -> np.ndarray:
+    """Render an overlay where each word is drawn individually so we can either
+    highlight ONE word (karaoke) or reveal only the first N words (kinetic typography).
+
+    - highlight_word_idx: index of the word to draw in highlight_color. None = draw all
+      words in the base font_color.
+    - visible_word_count: render only words[0..N-1]. None = render all words.
+    """
+    font_size = int(overlay_style.get("font_size", 64))
+    color_hex = overlay_style.get("font_color", "#FFFFFF")
+    highlight_hex = overlay_style.get("highlight_color", "#FCD34D")
+    shadow_opacity = float(overlay_style.get("shadow_opacity", 0.55))
+    shadow_blur = int(overlay_style.get("shadow_blur", 12))
+    position = overlay_style.get("text_position", "center")
+    font_family = overlay_style.get("font_family", DEFAULT_OVERLAY_FONT)
+
+    base_rgb = _hex_to_rgb(color_hex)
+    hi_rgb = _hex_to_rgb(highlight_hex)
+    alpha_shadow = int(255 * max(0.0, min(1.0, shadow_opacity)))
+
+    font = ImageFont.truetype(_font_path(font_family), font_size)
+    space_w = font.getbbox(" ")[2]
+
+    words = full_text.split()
+    if visible_word_count is not None:
+        words = words[:max(0, visible_word_count)]
+    if not words:
+        return np.zeros((height, width, 4), dtype=np.uint8)
+
+    # Word-wrap into lines (matching _render_text_overlay_image's max width)
+    max_text_width = int(width * 0.85)
+    lines: List[List[Tuple[int, str, int]]] = [[]]  # [[(orig_word_idx, word, width), ...], ...]
+    cur_w = 0
+    for i, w in enumerate(words):
+        ww = font.getbbox(w)[2]
+        add_w = ww + (space_w if cur_w > 0 else 0)
+        if cur_w + add_w > max_text_width and cur_w > 0:
+            lines.append([])
+            cur_w = 0
+        lines[-1].append((i, w, ww))
+        cur_w += add_w if cur_w > 0 else ww
+
+    line_height = int(font_size * 1.2)
+    text_block_h = line_height * len(lines)
+    if position == "top":
+        y_start = int(height * 0.08)
+    elif position == "bottom":
+        y_start = height - text_block_h - int(height * 0.12)
+    else:
+        y_start = (height - text_block_h) // 2
+
+    # Pass 1: shadow layer
+    shadow_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    sdraw = ImageDraw.Draw(shadow_layer)
+    for li, line in enumerate(lines):
+        line_w = sum(ww for _, _, ww in line) + space_w * (len(line) - 1)
+        x = (width - line_w) // 2
+        y = y_start + li * line_height
+        cx = x
+        for _, w, ww in line:
+            sdraw.text((cx, y), w, font=font, fill=(0, 0, 0, alpha_shadow))
+            cx += ww + space_w
+    if shadow_blur > 0:
+        shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=shadow_blur))
+
+    # Pass 2: text layer (per-word so we can color them differently)
+    text_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    tdraw = ImageDraw.Draw(text_layer)
+    for li, line in enumerate(lines):
+        line_w = sum(ww for _, _, ww in line) + space_w * (len(line) - 1)
+        x = (width - line_w) // 2
+        y = y_start + li * line_height
+        cx = x
+        for orig_i, w, ww in line:
+            color = hi_rgb if (highlight_word_idx == orig_i) else base_rgb
+            tdraw.text((cx, y), w, font=font, fill=(*color, 255))
+            cx += ww + space_w
+
+    overlay = Image.alpha_composite(shadow_layer, text_layer)
+    return np.array(overlay)
+
+
+def _build_scene_overlays(
+    scene: Dict[str, Any],
+    duration: float,
+    video_w: int,
+    video_h: int,
+    overlay_style: Dict[str, Any],
+) -> List[Any]:
+    """Build the lyric ImageClips for a scene, honoring lyric_mode ("phrase"|"karaoke"|"kinetic").
+
+    Returns a list of ImageClips already positioned in scene-relative time. Empty list if
+    no overlay should be drawn (e.g., instrumental scene or no text).
+    """
+    text = (scene.get("text") or "").strip()
+    if not text:
+        return []
+
+    # Per-scene style override merges on top of the project-wide style
+    merged_style = dict(overlay_style)
+    for k, v in (scene.get("overlay_override") or {}).items():
+        if v is not None:
+            merged_style[k] = v
+
+    lyric_mode = merged_style.get("lyric_mode", "phrase")
+    words = scene.get("words") or []
+    scene_start = float(scene.get("start", 0.0))
+
+    if lyric_mode == "phrase" or not words:
+        # Single static overlay for the whole scene
+        ov = _render_text_overlay_image(text, video_w, video_h, merged_style)
+        return [ImageClip(ov, transparent=True).set_duration(duration).set_start(0)]
+
+    word_count = len(words)
+    clips = []
+    if lyric_mode == "karaoke":
+        # For each word: an overlay where THAT word is highlighted, visible during the word's time
+        for i, w in enumerate(words):
+            ov = _render_text_overlay_with_highlight(
+                text, video_w, video_h, merged_style, highlight_word_idx=i
+            )
+            local_start = max(0.0, float(w["start"]) - scene_start)
+            local_end = max(local_start + 0.05, float(w["end"]) - scene_start)
+            # Last word holds until scene end
+            if i == word_count - 1:
+                local_end = duration
+            clip = (
+                ImageClip(ov, transparent=True)
+                .set_duration(max(0.05, local_end - local_start))
+                .set_start(local_start)
+            )
+            clips.append(clip)
+    elif lyric_mode == "kinetic":
+        # For each word: an overlay showing words[0..i], visible from word[i].start to next word's
+        # start (or scene end). Words appear and stay; the whole phrase is visible by the end.
+        for i, w in enumerate(words):
+            ov = _render_text_overlay_with_highlight(
+                text, video_w, video_h, merged_style, visible_word_count=i + 1
+            )
+            local_start = max(0.0, float(w["start"]) - scene_start)
+            next_start = (
+                duration
+                if i == word_count - 1
+                else max(local_start + 0.05, float(words[i + 1]["start"]) - scene_start)
+            )
+            clip = (
+                ImageClip(ov, transparent=True)
+                .set_duration(max(0.05, next_start - local_start))
+                .set_start(local_start)
+            )
+            clips.append(clip)
+    else:
+        # Unknown mode → fallback to phrase
+        ov = _render_text_overlay_image(text, video_w, video_h, merged_style)
+        clips.append(ImageClip(ov, transparent=True).set_duration(duration).set_start(0))
+
+    return clips
+
+
 def render_video(
     scenes: List[Dict[str, Any]],
     audio_path: str,
@@ -226,26 +392,17 @@ def render_video(
         image_paths = scene.get("image_paths") or []
         if not image_paths and scene.get("image_path"):
             image_paths = [scene["image_path"]]
-        # Filter to those that exist
         image_paths = [p for p in image_paths if p and os.path.exists(p)]
         if not image_paths:
             continue
 
         base_clip = _scene_video(image_paths, duration, idx, video_w, video_h)
 
-        if burn_subtitles and scene.get("text"):
-            overlay_np = _render_text_overlay_image(scene["text"], video_w, video_h, overlay_style)
-            text_clip = ImageClip(overlay_np, transparent=True).set_duration(duration)
-            composite = CompositeVideoClip(
-                [base_clip, text_clip], size=(video_w, video_h)
-            ).set_duration(duration)
-        else:
-            composite = CompositeVideoClip(
-                [base_clip], size=(video_w, video_h)
-            ).set_duration(duration)
-        # Apply scene-to-scene crossfade on the OUTER composite so its alpha mask
-        # propagates correctly during the 0.6s overlap with the previous scene.
-        # (Skip on the very first scene — let it open at full opacity.)
+        layers: List[Any] = [base_clip]
+        if burn_subtitles:
+            layers.extend(_build_scene_overlays(scene, duration, video_w, video_h, overlay_style))
+
+        composite = CompositeVideoClip(layers, size=(video_w, video_h)).set_duration(duration)
         if idx > 0:
             composite = composite.crossfadein(0.6)
         clips.append(composite)

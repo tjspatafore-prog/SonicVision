@@ -52,6 +52,8 @@ DEFAULT_OVERLAY = {
     "shadow_blur": 12,
     "text_position": "center",
     "font_family": "Montserrat",
+    "lyric_mode": "phrase",          # "phrase" | "karaoke" | "kinetic"
+    "highlight_color": "#FCD34D",    # karaoke: color of the currently-sung word
 }
 
 # Fonts available for the lyric overlay. Frontend loads these via Google Fonts CSS;
@@ -81,8 +83,10 @@ class Scene(BaseModel):
     image_filename: Optional[str] = None  # backward-compat: first image
     image_filenames: List[str] = Field(default_factory=list)  # multi-image-per-scene
     image_status: str = "pending"  # pending, generating, completed, failed
-    style_override: Optional[str] = None  # per-scene style override (preset key)
+    style_override: Optional[str] = None  # per-scene image-style preset override
     kind: str = "lyric"  # "lyric" | "title" | "instrumental"
+    words: List[Dict[str, Any]] = Field(default_factory=list)  # [{"text": "...", "start": s, "end": s}, ...]
+    overlay_override: Optional[Dict[str, Any]] = None  # per-scene typography override (font_family, font_color, font_size)
 
 
 class Project(BaseModel):
@@ -121,12 +125,15 @@ class OverlayUpdate(BaseModel):
     shadow_blur: Optional[int] = None
     text_position: Optional[str] = None
     font_family: Optional[str] = None
+    lyric_mode: Optional[str] = None
+    highlight_color: Optional[str] = None
 
 
 class SceneUpdate(BaseModel):
     text: Optional[str] = None
     start: Optional[float] = None
     style_override: Optional[str] = None
+    overlay_override: Optional[Dict[str, Any]] = None  # null to clear; dict to set
 
 
 class BurnUpdate(BaseModel):
@@ -311,6 +318,7 @@ async def _run_pipeline(project_id: str) -> None:
                 "end": lg["end"],
                 "text": lg["text"],
                 "kind": "lyric",
+                "words": lg.get("words", []),
             })
             prev_end = lg["end"]
 
@@ -324,7 +332,14 @@ async def _run_pipeline(project_id: str) -> None:
             })
 
         scenes = [
-            Scene(idx=i, start=s["start"], end=s["end"], text=s["text"], kind=s["kind"])
+            Scene(
+                idx=i,
+                start=s["start"],
+                end=s["end"],
+                text=s["text"],
+                kind=s["kind"],
+                words=s.get("words", []),
+            )
             for i, s in enumerate(scene_dicts)
         ]
 
@@ -419,6 +434,8 @@ async def _run_pipeline(project_id: str) -> None:
                     "end": s.end,
                     "text": s.text,
                     "image_paths": paths,
+                    "words": s.words,
+                    "overlay_override": s.overlay_override,
                 })
 
         video_name = "music_video.mp4"
@@ -477,6 +494,8 @@ async def _render_only(project_id: str) -> None:
                     "end": s.end,
                     "text": s.text,
                     "image_paths": paths,
+                    "words": s.words,
+                    "overlay_override": s.overlay_override,
                 })
 
         if not scenes_for_render:
@@ -620,6 +639,130 @@ async def create_project(
     return project
 
 
+class UrlImportBody(BaseModel):
+    url: str
+    name: Optional[str] = None
+    phrase_grouping: int = 1
+    images_per_scene: int = 1
+    style: str = "cinematic"
+    aspect_ratio: str = "16:9"
+    resolution: str = "720p"
+    image_quality: str = "low"
+    custom_style: Optional[str] = None
+    burn_subtitles: bool = False
+
+
+def _download_audio_via_ytdlp(url: str, out_dir: Path) -> Dict[str, str]:
+    """Download audio from a public URL (YouTube, SoundCloud, Bandcamp, Vimeo, Suno via
+    generic extractor, etc.) into out_dir as audio.mp3. Returns metadata used by the
+    project model (title, audio_filename).
+
+    Runs synchronously — yt-dlp is fast for an audio-only extract (typically <10s for
+    a 4-minute song). Raises HTTPException on failure with a user-friendly message.
+    """
+    import yt_dlp  # imported lazily so server start is fast
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_template = str(out_dir / "audio.%(ext)s")
+    ffmpeg_bin = shutil.which("ffmpeg")
+    # Fallback to imageio-ffmpeg's bundled binary if no system ffmpeg
+    if not ffmpeg_bin:
+        try:
+            import imageio_ffmpeg
+            ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg_bin = None
+
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": out_template,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }],
+        "extract_flat": False,
+        "writeinfojson": False,
+    }
+    if ffmpeg_bin:
+        # yt-dlp wants the path to the ffmpeg DIRECTORY, not the binary itself
+        ydl_opts["ffmpeg_location"] = str(Path(ffmpeg_bin).parent)
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as exc:
+        raise HTTPException(
+            400,
+            f"Couldn't fetch audio from that URL. yt-dlp says: {str(exc)[:280]}",
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"URL import failed: {exc}")
+
+    # After post-processing, the audio file ends up as audio.mp3
+    mp3_path = out_dir / "audio.mp3"
+    if not mp3_path.exists():
+        # Find any audio file yt-dlp produced and rename
+        candidates = list(out_dir.glob("audio.*"))
+        if not candidates:
+            raise HTTPException(500, "yt-dlp finished but no audio file was produced")
+        candidates[0].rename(mp3_path)
+
+    title = (info.get("title") or "Untitled").strip()
+    return {"title": title, "audio_filename": "audio.mp3"}
+
+
+@api_router.post("/projects/from-url", response_model=Project)
+async def create_project_from_url(
+    body: UrlImportBody,
+    background_tasks: BackgroundTasks,
+):
+    """Create a project by importing audio from a URL (YouTube, SoundCloud, Vimeo,
+    Bandcamp, Suno, and other yt-dlp-supported sources). Runs the same downstream
+    pipeline as a file upload."""
+    if not body.url or not body.url.strip().lower().startswith(("http://", "https://")):
+        raise HTTPException(400, "URL must start with http:// or https://")
+
+    aspect_ratio = body.aspect_ratio if body.aspect_ratio in ("16:9", "9:16") else "16:9"
+    resolution = body.resolution if body.resolution in ("720p", "1080p") else "720p"
+    image_quality = body.image_quality if body.image_quality in ("low", "medium", "high") else "low"
+    custom = (body.custom_style or "").strip() or None
+    if body.style == "other" and not custom:
+        raise HTTPException(400, "custom_style is required when style is 'other'")
+
+    project_id = str(uuid.uuid4())
+    pdir = _project_dir(project_id)
+
+    # Download synchronously so we can report failure right away
+    try:
+        meta = await asyncio.to_thread(_download_audio_via_ytdlp, body.url.strip(), pdir)
+    except HTTPException:
+        # Clean up the (mostly empty) project dir on failure
+        shutil.rmtree(pdir, ignore_errors=True)
+        raise
+
+    project = Project(
+        id=project_id,
+        name=(body.name or meta["title"])[:120],
+        audio_filename=meta["audio_filename"],
+        phrase_grouping=max(1, min(2, int(body.phrase_grouping))),
+        images_per_scene=max(1, min(3, int(body.images_per_scene))),
+        style=body.style,
+        custom_style=custom,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution,
+        image_quality=image_quality,
+        burn_subtitles=bool(body.burn_subtitles),
+    )
+    await _save_project(project)
+
+    background_tasks.add_task(_run_pipeline, project_id)
+    return project
+
+
 @api_router.get("/projects", response_model=List[Project])
 async def list_projects():
     docs = await db.projects.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
@@ -705,6 +848,10 @@ async def update_scene(project_id: str, idx: int, body: SceneUpdate):
         if idx > 0:
             project.scenes[idx - 1].end = new_start
         scene.start = new_start
+    # overlay_override is a partial dict (font_family, font_color, font_size, etc.) or
+    # an empty dict to clear the override entirely.
+    if body.overlay_override is not None:
+        scene.overlay_override = body.overlay_override or None
 
     project.scenes[idx] = scene
     await _save_project(project)

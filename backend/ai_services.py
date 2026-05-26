@@ -64,21 +64,26 @@ OUTPUT JSON ONLY (no prose, no markdown) with these fields:
    - Skip purely instrumental sections (do NOT emit empty/placeholder segments for them).
    - "text" = exact words sung in that phrase, naturally capitalized, no end punctuation unless it carries meaning (?, !).
    - Best-guess unclear words; do not insert "[unclear]" placeholders.
+   - "words" = ordered list of every word in this segment with its own decimal start/end timestamps:
+       [{"text": "I", "start_seconds": 12.34, "end_seconds": 12.45},
+        {"text": "was", "start_seconds": 12.45, "end_seconds": 12.62},
+        ...]
+     Word timestamps drive KARAOKE highlighting and KINETIC TYPOGRAPHY in the video — be as precise as you can.
+     Held/sustained syllables should have a longer end_seconds. Words inside a quick run should be tightly packed.
+     Each word's text should NOT include leading/trailing whitespace or punctuation glyphs (commas, periods).
 """
 
 
 async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
-    """Transcribe singing lyrics with phrase-level timestamps + derive a song-wide visual concept,
-    in a single Gemini 2.5 Pro call.
+    """Transcribe singing lyrics with phrase-level + word-level timestamps and derive a song-wide
+    visual concept, in a single Gemini 2.5 Pro call.
 
-    Returns dict with 'text', 'duration', 'segments' (each with start, end, text), and 'visual_concept'.
+    Returns dict with 'text', 'duration', 'segments' (each with start/end/text/words), 'visual_concept'.
     """
     client = _get_gemini_client()
 
-    # Upload audio file (Gemini Files API; required for files > 20MB and recommended for all sizes)
     audio_file = await client.aio.files.upload(file=audio_path)
 
-    # Wait for the upload to be ACTIVE before we can reference it
     for _ in range(60):
         state = getattr(audio_file.state, "name", str(audio_file.state))
         if state == "ACTIVE":
@@ -90,7 +95,15 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
     else:
         raise RuntimeError("Audio file did not become ACTIVE within 60 seconds")
 
-    # Structured JSON schema so we get reliable timestamped output + visual concept
+    word_schema = genai_types.Schema(
+        type=genai_types.Type.OBJECT,
+        properties={
+            "text": genai_types.Schema(type=genai_types.Type.STRING),
+            "start_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
+            "end_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
+        },
+        required=["text", "start_seconds", "end_seconds"],
+    )
     schema = genai_types.Schema(
         type=genai_types.Type.OBJECT,
         properties={
@@ -104,8 +117,12 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
                         "start_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
                         "end_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
                         "text": genai_types.Schema(type=genai_types.Type.STRING),
+                        "words": genai_types.Schema(
+                            type=genai_types.Type.ARRAY,
+                            items=word_schema,
+                        ),
                     },
-                    required=["start_seconds", "end_seconds", "text"],
+                    required=["start_seconds", "end_seconds", "text", "words"],
                 ),
             ),
         },
@@ -123,7 +140,6 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
             ),
         )
     finally:
-        # Best-effort cleanup of uploaded file
         try:
             await client.aio.files.delete(name=audio_file.name)
         except Exception:
@@ -138,10 +154,36 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
         text = (seg.get("text") or "").strip()
         if not text:
             continue
+        seg_start = float(seg.get("start_seconds") or 0.0)
+        seg_end = float(seg.get("end_seconds") or 0.0)
+        words: List[Dict[str, Any]] = []
+        for w in (seg.get("words") or []):
+            wtxt = (w.get("text") or "").strip()
+            if not wtxt:
+                continue
+            words.append({
+                "text": wtxt,
+                "start": float(w.get("start_seconds") or seg_start),
+                "end": float(w.get("end_seconds") or seg_end),
+            })
+        # Fallback: distribute words evenly if the model didn't return any
+        if not words and text:
+            tokens = text.split()
+            if tokens:
+                step = (seg_end - seg_start) / max(1, len(tokens))
+                words = [
+                    {
+                        "text": tok,
+                        "start": seg_start + i * step,
+                        "end": seg_start + (i + 1) * step,
+                    }
+                    for i, tok in enumerate(tokens)
+                ]
         segments.append({
-            "start": float(seg.get("start_seconds") or 0.0),
-            "end": float(seg.get("end_seconds") or 0.0),
+            "start": seg_start,
+            "end": seg_end,
             "text": text,
+            "words": words,
         })
 
     if duration <= 0 and segments:
@@ -164,8 +206,9 @@ def group_segments_into_phrases(
     """Group lyric segments into N-phrase scenes.
 
     Preserves the REAL start/end of each sung phrase so the caller can detect gaps
-    (instrumental breaks) and insert non-lyric scenes for them. total_duration is
-    used by the caller, not here.
+    (instrumental breaks) and insert non-lyric scenes for them. Also concatenates
+    each member segment's word-level timestamps into the grouped scene so karaoke /
+    kinetic rendering still has per-word timing after grouping.
     """
     if not segments:
         return []
@@ -178,8 +221,11 @@ def group_segments_into_phrases(
         start = chunk[0]["start"]
         end = chunk[-1]["end"]
         text = " ".join(s["text"] for s in chunk).strip()
+        words: List[Dict[str, Any]] = []
+        for s in chunk:
+            words.extend(s.get("words", []) or [])
         if text:
-            scenes.append({"start": start, "end": end, "text": text})
+            scenes.append({"start": start, "end": end, "text": text, "words": words})
         i += n
 
     return scenes
