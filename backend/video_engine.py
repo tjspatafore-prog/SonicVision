@@ -58,7 +58,19 @@ def _font_path(family: str = "") -> str:
     path = FONT_MAP.get(family) or FONT_MAP.get(DEFAULT_OVERLAY_FONT)
     if path and os.path.exists(path):
         return path
-    return FONT_REGULAR if os.path.exists(FONT_REGULAR) else FONT_FALLBACK
+    # System fallbacks
+    for cand in [
+        FONT_REGULAR,
+        FONT_FALLBACK,
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+    ]:
+        if os.path.exists(cand):
+            return cand
+    # Fallback to any TTF in FONTS_DIR
+    for f in FONTS_DIR.glob("*.ttf"):
+        return str(f)
+    return ""
 
 
 def _hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
@@ -324,9 +336,15 @@ def _build_scene_overlays(
     scene_start = float(scene.get("start", 0.0))
 
     if lyric_mode == "phrase" or not words:
-        # Single static overlay for the whole scene
+        # Tight caption window: display only between text_start and text_end
+        ts = scene.get("text_start")
+        te = scene.get("text_end")
+        local_start = max(0.0, float(ts) - scene_start) if ts is not None else 0.0
+        local_end = min(duration, float(te) - scene_start) if te is not None else duration
+        clip_dur = max(0.1, local_end - local_start)
+
         ov = _render_text_overlay_image(text, video_w, video_h, merged_style)
-        return [ImageClip(ov, transparent=True).set_duration(duration).set_start(0)]
+        return [ImageClip(ov, transparent=True).set_duration(clip_dur).set_start(local_start)]
 
     word_count = len(words)
     clips = []

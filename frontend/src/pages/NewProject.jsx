@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { createProject, createProjectFromUrl } from "@/lib/api";
+import { createProject, createProjectFromUrl, getProviders } from "@/lib/api";
 import { STYLE_PRESETS } from "@/lib/stylePresets";
 import { toast } from "sonner";
 import {
@@ -12,6 +12,8 @@ import {
   Smartphone,
   Subtitles,
   Link2,
+  Sparkles,
+  Repeat,
 } from "lucide-react";
 
 export default function NewProject() {
@@ -26,11 +28,25 @@ export default function NewProject() {
   const [aspectRatio, setAspectRatio] = useState("16:9");
   const [resolution, setResolution] = useState("720p");
   const [imageQuality, setImageQuality] = useState("low");
-  const [burnSubtitles, setBurnSubtitles] = useState(false);
+  const [imageProvider, setImageProvider] = useState("grok");
+  const [promptProvider, setPromptProvider] = useState("claude");
+  const [reuseChorus, setReuseChorus] = useState(true);
+  const [providersData, setProvidersData] = useState(null);
+  const [burnSubtitles, setBurnSubtitles] = useState(true);
   const [dragging, setDragging] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const inputRef = useRef(null);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    getProviders()
+      .then((data) => {
+        setProvidersData(data);
+        if (data.defaults?.image_provider) setImageProvider(data.defaults.image_provider);
+        if (data.defaults?.prompt_provider) setPromptProvider(data.defaults.prompt_provider);
+      })
+      .catch(() => {});
+  }, []);
 
   const handleFile = (f) => {
     const allowed = [".mp3", ".wav", ".mp4", ".m4a"];
@@ -82,6 +98,9 @@ export default function NewProject() {
         formData.append("aspect_ratio", aspectRatio);
         formData.append("resolution", resolution);
         formData.append("image_quality", imageQuality);
+        formData.append("image_provider", imageProvider);
+        formData.append("prompt_provider", promptProvider);
+        formData.append("reuse_chorus_images", String(reuseChorus));
         formData.append("burn_subtitles", String(burnSubtitles));
         if (style === "other") formData.append("custom_style", customStyle.trim());
         proj = await createProject(formData);
@@ -96,6 +115,9 @@ export default function NewProject() {
           aspect_ratio: aspectRatio,
           resolution,
           image_quality: imageQuality,
+          image_provider: imageProvider,
+          prompt_provider: promptProvider,
+          reuse_chorus_images: reuseChorus,
           burn_subtitles: burnSubtitles,
           custom_style: style === "other" ? customStyle.trim() : null,
         });
@@ -262,20 +284,118 @@ export default function NewProject() {
         </div>
       </div>
 
-      {/* Image quality (OpenAI gpt-image-1-mini cost picker) */}
+      {/* AI Model Selection */}
+      <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div>
+          <div className="flex items-baseline justify-between mb-2">
+            <label className="label-tracking">Image Generator</label>
+            <span className="text-[11px] text-zinc-500">1–6¢ budget per image</span>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { id: "grok", label: "Grok Imagine", cost: "~$0.04", hint: "Top quality" },
+              { id: "gemini", label: "Nano Banana 2", cost: "~$0.045", hint: "Vivid" },
+              { id: "openai", label: "OpenAI GPT", cost: "~$0.006+", hint: "Economical" },
+            ].map((p) => {
+              const avail = providersData?.image_providers?.find((x) => x.name === p.id)?.available ?? true;
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => setImageProvider(p.id)}
+                  className={`px-3 py-3 rounded border text-sm text-left transition-colors ${
+                    imageProvider === p.id
+                      ? "border-amber-500 bg-amber-500/10 text-amber-400"
+                      : "border-zinc-800 text-zinc-300 hover:border-zinc-700"
+                  } ${!avail ? "opacity-60" : ""}`}
+                >
+                  <span className="block font-medium truncate" style={{ fontFamily: "Outfit" }}>
+                    {p.label}
+                  </span>
+                  <span className="block text-[11px] text-zinc-400 tabular-nums mt-0.5">{p.cost}</span>
+                  <span className="block text-[10px] text-zinc-600 mt-0.5">{p.hint}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-baseline justify-between mb-2">
+            <label className="label-tracking">Art Director (Prompts)</label>
+            <span className="text-[11px] text-zinc-500">~1–2¢ total per song</span>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { id: "claude", label: "Claude", hint: "Best storytelling" },
+              { id: "openai", label: "ChatGPT", hint: "Balanced" },
+              { id: "grok", label: "Grok", hint: "Creative" },
+            ].map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setPromptProvider(p.id)}
+                className={`px-3 py-3 rounded border text-sm text-left transition-colors ${
+                  promptProvider === p.id
+                    ? "border-amber-500 bg-amber-500/10 text-amber-400"
+                    : "border-zinc-800 text-zinc-300 hover:border-zinc-700"
+                }`}
+              >
+                <span className="block font-medium truncate" style={{ fontFamily: "Outfit" }}>
+                  {p.label}
+                </span>
+                <span className="block text-[10px] text-zinc-500 mt-1">{p.hint}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Chorus image reuse toggle */}
+      <div className="mt-6">
+        <button
+          onClick={() => setReuseChorus((v) => !v)}
+          className={`w-full flex items-center justify-between px-4 py-3 rounded border text-sm transition-colors ${
+            reuseChorus
+              ? "border-amber-500/40 bg-amber-500/5 text-amber-300"
+              : "border-zinc-800 text-zinc-400 hover:border-zinc-700"
+          }`}
+        >
+          <div className="flex items-center gap-3">
+            <Repeat className="w-4 h-4 text-amber-500" />
+            <div className="text-left">
+              <span className="block font-medium">Reuse chorus scene images</span>
+              <span className="block text-[11px] text-zinc-500">
+                Identical repeated lyric phrases reuse the first visual, saving ~25–40% on AI image costs.
+              </span>
+            </div>
+          </div>
+          <span
+            className={`w-9 h-5 rounded-full transition-colors relative inline-block ${
+              reuseChorus ? "bg-amber-500" : "bg-zinc-700"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-black transition-transform ${
+                reuseChorus ? "translate-x-4" : ""
+              }`}
+            />
+          </span>
+        </button>
+      </div>
+
+      {/* Image quality tier */}
       <div className="mt-8">
         <div className="flex items-baseline justify-between mb-2">
-          <label className="label-tracking">Image quality</label>
-          <span className="text-[11px] text-zinc-500">Directly impacts your OpenAI bill</span>
+          <label className="label-tracking">Image quality tier</label>
+          <span className="text-[11px] text-zinc-500">Applies to OpenAI / Grok</span>
         </div>
         <div
           data-testid="image-quality-grid"
           className="grid grid-cols-1 md:grid-cols-3 gap-2"
         >
           {[
-            { v: "low", label: "Low", cost16: "~$0.006", cost9: "~$0.006", hint: "Cheapest · draft" },
-            { v: "medium", label: "Medium", cost16: "~$0.015", cost9: "~$0.015", hint: "Balanced" },
-            { v: "high", label: "High", cost16: "~$0.052", cost9: "~$0.052", hint: "Max detail" },
+            { v: "low", label: "Low (Standard)", hint: "Fastest · most economical" },
+            { v: "medium", label: "Medium", hint: "Balanced clarity" },
+            { v: "high", label: "High", hint: "Maximum detail" },
           ].map((q) => (
             <button
               key={q.v}
@@ -290,23 +410,10 @@ export default function NewProject() {
               <span className="block font-medium" style={{ fontFamily: "Outfit" }}>
                 {q.label}
               </span>
-              <span
-                className={`block text-[11px] tabular-nums mt-1 ${
-                  imageQuality === q.v ? "text-amber-300" : "text-zinc-400"
-                }`}
-              >
-                {aspectRatio === "16:9" ? q.cost16 : q.cost9}/img
-              </span>
-              <span className="block text-[10px] text-zinc-600 mt-0.5">{q.hint}</span>
+              <span className="block text-[10px] text-zinc-600 mt-1">{q.hint}</span>
             </button>
           ))}
         </div>
-        <p className="text-[11px] text-zinc-600 mt-2 leading-relaxed">
-          Powered by OpenAI <span className="text-zinc-500">gpt-image-1-mini</span> at{" "}
-          {aspectRatio === "16:9" ? "1536×1024" : "1024×1536"}. Image quality only controls the
-          AI-generated scene art behind each lyric — final video still renders at your chosen
-          720p / 1080p output.
-        </p>
       </div>
 
       {/* Images per scene + Burn subtitles */}

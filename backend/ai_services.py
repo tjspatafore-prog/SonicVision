@@ -1,46 +1,25 @@
 """AI services:
-- Audio transcription via Gemini 2.5 Pro (direct Google AI Studio key) — better lyric accuracy + precise phrase timestamps
-- Image generation via OpenAI gpt-image-1-mini (direct OpenAI key)
+- Lyric text + song-wide visual concept via Gemini (model from GEMINI_TRANSCRIBE_MODEL)
+- Accurate word timing via Deepgram / Whisper + alignment (see timing.py)
+- "Art director" scene prompts via Claude / GPT / Gemini / Grok (see providers.llm_json)
+- Image generation via Grok Imagine / Gemini Nano Banana / OpenAI GPT Image (providers.generate_image)
 """
 import asyncio
-import base64
-import io
 import json
+import logging
 import os
-import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PIL import Image
-from google import genai
 from google.genai import types as genai_types
-from openai import AsyncOpenAI
+
+import providers
+import timing
+
+logger = logging.getLogger("sonicvision.ai")
 
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-GOOGLE_AI_API_KEY = os.environ.get("GOOGLE_AI_API_KEY")
-
-# Singleton clients
-_openai_client: Optional[AsyncOpenAI] = None
-_gemini_client: Optional[genai.Client] = None
-
-
-def _get_openai_client() -> AsyncOpenAI:
-    global _openai_client
-    if _openai_client is None:
-        if not OPENAI_API_KEY:
-            raise RuntimeError("OPENAI_API_KEY is not set — required for image generation")
-        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    return _openai_client
-
-
-def _get_gemini_client() -> genai.Client:
-    global _gemini_client
-    if _gemini_client is None:
-        if not GOOGLE_AI_API_KEY:
-            raise RuntimeError("GOOGLE_AI_API_KEY is not set — required for transcription")
-        _gemini_client = genai.Client(api_key=GOOGLE_AI_API_KEY)
-    return _gemini_client
+def _get_gemini_client():
+    return providers.gemini_client()
 
 
 _TRANSCRIPTION_PROMPT = """You are transcribing and analyzing the LYRICS of a song.
@@ -126,8 +105,9 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
         required=["duration_seconds", "visual_concept", "segments"],
     )
 
+    model_name = providers.models().get("gemini_transcribe", "gemini-2.5-pro")
     response = await client.aio.models.generate_content(
-        model="gemini-2.5-pro",
+        model=model_name,
         contents=[_TRANSCRIPTION_PROMPT, audio_part],
         config=genai_types.GenerateContentConfig(
             response_mime_type="application/json",
@@ -137,10 +117,13 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
     )
 
     parsed = json.loads(response.text)
-    duration = float(parsed.get("duration_seconds") or 0.0)
     visual_concept = (parsed.get("visual_concept") or "").strip()
 
-    segments: List[Dict[str, Any]] = []
+    # Get real audio duration from ffprobe/moviepy
+    real_duration = timing.probe_duration(audio_path)
+    duration = real_duration if real_duration > 0 else float(parsed.get("duration_seconds") or 0.0)
+
+    raw_segments: List[Dict[str, Any]] = []
     for seg in parsed.get("segments", []) or []:
         text = (seg.get("text") or "").strip()
         if not text:
@@ -157,7 +140,6 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
                 "start": float(w.get("start_seconds") or seg_start),
                 "end": float(w.get("end_seconds") or seg_end),
             })
-        # Fallback: distribute words evenly if the model didn't return any
         if not words and text:
             tokens = text.split()
             if tokens:
@@ -170,15 +152,34 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
                     }
                     for i, tok in enumerate(tokens)
                 ]
-        segments.append({
+        raw_segments.append({
             "start": seg_start,
             "end": seg_end,
             "text": text,
             "words": words,
         })
 
-    if duration <= 0 and segments:
-        duration = segments[-1]["end"]
+    if duration <= 0 and raw_segments:
+        duration = raw_segments[-1]["end"]
+
+    # Hybrid alignment: get acoustic word timestamps (Deepgram Nova-3 or Whisper)
+    all_lyric_words = [w["text"] for s in raw_segments for w in s.get("words", [])]
+    pref_timing = providers.default_timing_provider()
+    asr_words, timing_used = await timing.acoustic_words(pref_timing, audio_path, all_lyric_words)
+    logger.info("Acoustic timing provider used: %s (got %d words)", timing_used, len(asr_words))
+
+    if asr_words:
+        aligned_segments, ratio = timing.apply_alignment_to_segments(raw_segments, asr_words, duration)
+        logger.info("Aligned segments with match ratio: %.2f", ratio)
+        segments = aligned_segments
+    else:
+        # Finalize words without acoustic alignment
+        for s in raw_segments:
+            s["words"] = timing.finalize_words(s.get("words", []), duration)
+            if s["words"]:
+                s["start"] = s["words"][0]["start"]
+                s["end"] = s["words"][-1]["end"]
+        segments = raw_segments
 
     full_text = " ".join(s["text"] for s in segments)
     return {
@@ -186,126 +187,75 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
         "duration": duration,
         "segments": segments,
         "visual_concept": visual_concept,
+        "timing_engine": timing_used,
     }
 
 
-def group_segments_into_phrases(
-    segments: List[Dict[str, Any]],
-    phrases_per_scene: int,
-    total_duration: float,
-) -> List[Dict[str, Any]]:
-    """Group lyric segments into N-phrase scenes.
-
-    Preserves the REAL start/end of each sung phrase so the caller can detect gaps
-    (instrumental breaks) and insert non-lyric scenes for them. Also concatenates
-    each member segment's word-level timestamps into the grouped scene so karaoke /
-    kinetic rendering still has per-word timing after grouping.
-    """
-    if not segments:
-        return []
-
-    scenes: List[Dict[str, Any]] = []
-    n = max(1, int(phrases_per_scene))
-    i = 0
-    while i < len(segments):
-        chunk = segments[i:i + n]
-        start = chunk[0]["start"]
-        end = chunk[-1]["end"]
-        text = " ".join(s["text"] for s in chunk).strip()
-        words: List[Dict[str, Any]] = []
-        for s in chunk:
-            words.extend(s.get("words", []) or [])
-        if text:
-            scenes.append({"start": start, "end": end, "text": text, "words": words})
-        i += n
-
-    return scenes
-
-
-STYLE_PRESETS = {
-    "cinematic": "cinematic atmospheric scene, dramatic moody lighting, painterly photographic style, rich color grading, shallow depth of field",
-    "anime": "Studio Ghibli inspired anime illustration, soft watercolor textures, expressive line work, vibrant nature, magical atmosphere",
-    "vintage_film": "1970s Kodachrome film photograph, warm faded tones, light grain, soft sun flares, retro nostalgic atmosphere",
-    "neon_cyberpunk": "neon cyberpunk scene, rain-soaked streets, vivid pink and electric blue neon signs, futuristic cityscape, dramatic chiaroscuro lighting",
-    "watercolor": "loose watercolor painting on textured paper, soft washes of color, visible brush strokes, gentle dreamy mood, paper grain",
-    "oil_painting": "classical oil painting in Renaissance style, rich impasto brushwork, golden chiaroscuro lighting, dramatic composition, baroque atmosphere",
-    "film_noir": "black and white film noir photograph, high contrast shadows, venetian blind light patterns, 1940s cinematic mood, smoky atmosphere",
-    "pixel_art": "16-bit pixel art illustration, retro SNES JRPG style, vibrant limited palette, crisp pixel edges, dithered shading, isometric perspective",
-    "comic_book": "graphic novel comic book illustration, bold ink outlines, halftone shading, dramatic action panel composition, saturated comic colors",
-    "pastel_dream": "soft pastel dreamscape, lavender and rose color palette, soft glow, ethereal cloud-like atmosphere, fairytale lighting",
-    "synthwave": "1980s synthwave retro-futurism, magenta and cyan grid horizon, palm tree silhouettes, glowing sun, chrome reflections, outrun aesthetic",
-    "documentary": "candid documentary photograph, natural light, photojournalism aesthetic, realistic textures, 35mm film grain, raw emotional moment",
-    "lofi_cafe": "cozy lo-fi anime aesthetic, warm cafe interior, rainy window, soft afternoon light, hand-drawn illustration style, peaceful study vibe",
-    "surrealist": "Salvador Dali inspired surrealist oil painting, melting impossible forms, dreamlike desert landscape, hyper-detailed strange symbolism",
-    "bronze_relief": "ancient bronze bas-relief sculpture carved into a single solid metal panel, warm bronze patina with subtle verdigris accents, intricate raised figures and scenery cast in metal, dramatic side lighting casting deep shadows across the textured metal surface, weathered aged museum-artifact aesthetic, monochromatic bronze tones, no painted color",
-}
-
-
-
-
-def _build_image_prompt(
-    lyric: str,
-    style: str = "cinematic",
-    aspect_ratio: str = "16:9",
-    custom_style: Optional[str] = None,
-    variation_idx: int = 0,
-    song_context: str = "",
-    scene_kind: str = "lyric",
+async def generate_art_director_prompts(
+    scenes: List[Dict[str, Any]],
+    visual_concept: str,
     song_title: str = "",
-) -> str:
-    if style == "other" and custom_style:
-        style_suffix = custom_style.strip()
-    else:
-        style_suffix = STYLE_PRESETS.get(style, STYLE_PRESETS["cinematic"])
-    composition = (
-        "vertical 9:16 portrait composition, tall framing"
-        if aspect_ratio == "9:16"
-        else "wide 16:9 cinematic composition, landscape framing"
-    )
-    variations = [
-        "wide establishing shot, full scene visible",
-        "medium close-up framing, focus on a key symbolic detail",
-        "low angle dramatic perspective, alternate moment of the same scene",
-        "high angle overhead view, different point of view of the scene",
-    ]
-    variation_hint = (
-        f" Variation {variation_idx + 1}: {variations[variation_idx % len(variations)]}."
-        if variation_idx > 0
-        else ""
+    style: str = "cinematic",
+    custom_style: Optional[str] = None,
+    prompt_provider: str = "claude",
+) -> Dict[int, str]:
+    """Single LLM call to act as Art Director, writing cohesive, consistent Midjourney-style
+    prompts for every scene in the song. Falls back to empty dict if LLM fails or is disabled.
+    """
+    if prompt_provider == "none" or not scenes:
+        return {}
+
+    resolved_provider = providers.resolve(providers.PROMPT_PROVIDERS, prompt_provider, fallback="none")
+    if resolved_provider == "none":
+        return {}
+
+    style_desc = custom_style if (style == "other" and custom_style) else STYLE_PRESETS.get(style, STYLE_PRESETS["cinematic"])
+
+    system_prompt = (
+        "You are an award-winning music video art director. Your job is to create visual prompts "
+        "for an AI image generator (like Midjourney/Grok) for every scene of a music video. "
+        "CRITICAL RULES:\n"
+        "1. VISUAL CONTINUITY: Establish recurring characters, consistent clothing/palette, and cohesive world aesthetic.\n"
+        "2. NO TEXT: Do not include words, lyrics, watermarks, letters, or subtitles in the prompts.\n"
+        "3. HIGH IMPACT: Focus on lighting, composition, cinematic camera angle, color grading, emotion, and environment.\n"
+        "4. Respond ONLY with a valid JSON object mapping scene index (integer string) to the final image prompt string."
     )
 
-    context_block = (
-        f"(Visual Theme Context: {song_context})\n"
-        if song_context else ""
+    scenes_input = []
+    for s in scenes:
+        scenes_input.append({
+            "idx": s.get("idx", 0),
+            "kind": s.get("kind", "lyric"),
+            "text": s.get("text", ""),
+            "duration": round(float(s.get("end", 0.0)) - float(s.get("start", 0.0)), 2),
+        })
+
+    user_prompt = (
+        f"Song Title: {song_title}\n"
+        f"Visual Concept World: {visual_concept}\n"
+        f"Chosen Aesthetic Style: {style_desc}\n\n"
+        f"Scenes to illustrate:\n{json.dumps(scenes_input, indent=2)}\n\n"
+        "Output JSON format:\n"
+        "{\n"
+        '  "0": "Cinematic shot description...",\n'
+        '  "1": "Next shot description..."\n'
+        "}"
     )
 
-    if scene_kind == "title":
-        subject_block = (
-            "This is the OPENING TITLE SHOT for a music video"
-            + (f' titled "{song_title}"' if song_title else "")
-            + ". Render an evocative establishing shot that introduces the mood. "
-            "Do NOT include any text, song titles, or letters in the image."
-        )
-    elif scene_kind == "instrumental":
-        subject_block = (
-            "This is an INSTRUMENTAL BRIDGE moment with no lyrics. Render a unique, dynamic scene "
-            "that captures motion or an emotional shift in the music. Make it visually distinct."
-        )
-    else:
-        subject_block = (
-            f'Focus primarily on illustrating the specific action, emotion, or objects in this exact lyric: "{lyric}". '
-            "Make this image highly distinct and directly tied to the words being sung. "
-            "Use the 'Visual Theme Context' only as a background aesthetic or color palette, not as the main subject."
-        )
-
-    return (
-        f"{context_block}"
-        f"{subject_block} "
-        f"Style: {style_suffix}. "
-        f"Composition: {composition}.{variation_hint} "
-        "Absolutely no text, captions, watermarks, logos, subtitles, or written words anywhere in the image. "
-        "Focus on mood, scenery, characters, and symbolism."
-    )
+    try:
+        data = await providers.llm_json(resolved_provider, system_prompt, user_prompt)
+        res = {}
+        if isinstance(data, dict):
+            for k, v in data.items():
+                try:
+                    res[int(k)] = str(v).strip()
+                except (ValueError, TypeError):
+                    continue
+        logger.info("Art director (%s) produced %d scene prompts", resolved_provider, len(res))
+        return res
+    except Exception as exc:
+        logger.warning("Art director prompt generation failed (%s): %s; falling back to templates", resolved_provider, exc)
+        return {}
 
 
 async def generate_scene_image(
@@ -319,46 +269,36 @@ async def generate_scene_image(
     song_context: str = "",
     scene_kind: str = "lyric",
     song_title: str = "",
+    art_director_prompt: Optional[str] = None,
+    image_provider: Optional[str] = None,
 ) -> str:
-    """Generate one image via OpenAI gpt-image-1-mini using the user's direct OpenAI key.
+    """Generate one image using the designated image provider (grok, gemini, or openai)."""
+    pref = image_provider or providers.default_image_provider()
+    resolved_provider = providers.resolve(providers.IMAGE_PROVIDERS, pref, fallback="openai")
 
-    image_size: OpenAI quality tier — "low" (~$0.005-0.006/img), "medium" (~$0.011-0.015/img),
-                "high" (~$0.036-0.052/img). Default "low" = cheapest tier.
-    scene_kind: "lyric" | "title" | "instrumental" — controls the prompt framing.
-    song_context: 2-4 sentence song-wide visual concept used to anchor every image.
-    """
-    client = _get_openai_client()
-    prompt = _build_image_prompt(
-        lyric, style, aspect_ratio, custom_style, variation_idx,
-        song_context=song_context, scene_kind=scene_kind, song_title=song_title,
+    if art_director_prompt and art_director_prompt.strip():
+        prompt = art_director_prompt.strip()
+    else:
+        prompt = _build_image_prompt(
+            lyric, style, aspect_ratio, custom_style, variation_idx,
+            song_context=song_context, scene_kind=scene_kind, song_title=song_title,
+        )
+
+    async def _do():
+        return await providers.generate_image(
+            provider=resolved_provider,
+            prompt=prompt,
+            out_path=out_path,
+            aspect_ratio=aspect_ratio,
+            quality=image_size,
+        )
+
+    return await providers.with_retries(
+        _do,
+        attempts=3,
+        base_delay=1.5,
+        what=f"generate_scene_image({resolved_provider})",
     )
-
-    size = "1536x1024" if aspect_ratio == "16:9" else "1024x1536"
-    quality = image_size if image_size in ("low", "medium", "high", "auto") else "low"
-
-    response = await client.images.generate(
-        model="gpt-image-1-mini",
-        prompt=prompt,
-        size=size,
-        quality=quality,
-        n=1,
-    )
-
-    if not response.data or not response.data[0].b64_json:
-        raise RuntimeError("gpt-image-1-mini returned no image")
-
-    image_bytes = base64.b64decode(response.data[0].b64_json)
-
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        img.save(out_path, "PNG", optimize=True)
-    except Exception:
-        with open(out_path, "wb") as f:
-            f.write(image_bytes)
-    return out_path
 
 
 def format_srt_timestamp(seconds: float) -> str:

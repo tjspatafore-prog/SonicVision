@@ -50,3 +50,5 @@ export const triggerTeaser = (projectId) =>
   api.post(`/projects/${projectId}/teaser`).then((r) => r.data);
 
 export const listFonts = () => api.get("/fonts").then((r) => r.data);
+
+export const getProviders = () => api.get("/providers").then((r) => r.data);

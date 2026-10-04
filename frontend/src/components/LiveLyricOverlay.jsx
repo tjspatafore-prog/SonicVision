@@ -68,7 +68,13 @@ export default function LiveLyricOverlay({
   }, []);
 
   const scene = findCurrentScene(scenes, currentTime);
-  const showText = scene && scene.kind !== "instrumental" && scene.text;
+  const inCaptionWindow = (() => {
+    if (!scene) return false;
+    const ts = scene.text_start !== undefined && scene.text_start !== null ? scene.text_start : scene.start;
+    const te = scene.text_end !== undefined && scene.text_end !== null ? scene.text_end : scene.end;
+    return currentTime >= ts && currentTime < te;
+  })();
+  const showText = scene && scene.kind !== "instrumental" && scene.text && inCaptionWindow;
 
   // Merge per-scene overlay override on top of project-wide style
   const merged = mergeStyle(style || {}, scene?.overlay_override);

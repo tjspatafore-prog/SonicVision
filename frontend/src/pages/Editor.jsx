@@ -304,10 +304,27 @@ export default function Editor() {
           >
             {project.name}
           </h1>
-          <p className="text-xs text-zinc-500 mt-1 font-mono">
-            {project.scenes.length} scenes · {project.aspect_ratio} ·{" "}
-            {project.resolution || "720p"} · {styleMeta.label}
-          </p>
+          <div className="flex items-center gap-2 mt-2 flex-wrap">
+            <span className="text-xs text-zinc-400 font-mono">
+              {project.scenes.length} scenes · {project.aspect_ratio} ·{" "}
+              {project.resolution || "720p"} · {styleMeta.label}
+            </span>
+            {project.image_provider && (
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400">
+                AI: {project.image_provider}
+              </span>
+            )}
+            {project.timing_engine && (
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300">
+                Timing: {project.timing_engine}
+              </span>
+            )}
+          </div>
+          {project.visual_concept && (
+            <p className="text-xs text-zinc-500 mt-2 max-w-xl italic line-clamp-2">
+              "{project.visual_concept}"
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {isCompleted && (
