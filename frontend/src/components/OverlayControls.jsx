@@ -24,6 +24,87 @@ const FALLBACK_FONTS = [
   { key: "Lobster", category: "Script" },
 ];
 
+const TYPOGRAPHY_PRESETS = [
+  {
+    id: "tiktok_pop",
+    label: "TikTok Pop",
+    icon: "🌟",
+    hint: "Bold punchy yellow, center karaoke glow",
+    style: {
+      font_family: "Montserrat",
+      font_size: 56,
+      font_color: "#FFFFFF",
+      highlight_color: "#FCD34D",
+      text_position: "center",
+      lyric_mode: "karaoke",
+      shadow_opacity: 0.85,
+      shadow_blur: 16,
+    },
+  },
+  {
+    id: "cinematic_serif",
+    label: "Cinematic",
+    icon: "🎬",
+    hint: "Sophisticated serif, elegant bottom letterbox",
+    style: {
+      font_family: "Playfair Display",
+      font_size: 42,
+      font_color: "#FFFFFF",
+      text_position: "bottom",
+      lyric_mode: "phrase",
+      shadow_opacity: 0.6,
+      shadow_blur: 10,
+    },
+  },
+  {
+    id: "lofi_vhs",
+    label: "90s Lo-Fi",
+    icon: "📼",
+    hint: "Casual script/handwritten with kinetic reveal",
+    style: {
+      font_family: "Caveat",
+      font_size: 52,
+      font_color: "#60A5FA",
+      highlight_color: "#FB7185",
+      text_position: "bottom",
+      lyric_mode: "kinetic",
+      shadow_opacity: 0.7,
+      shadow_blur: 14,
+    },
+  },
+  {
+    id: "neon_trap",
+    label: "Neon Cyber",
+    icon: "⚡",
+    hint: "Tall display font with neon mint & amber",
+    style: {
+      font_family: "Bebas Neue",
+      font_size: 64,
+      font_color: "#34D399",
+      highlight_color: "#F59E0B",
+      text_position: "center",
+      lyric_mode: "karaoke",
+      shadow_opacity: 0.9,
+      shadow_blur: 20,
+    },
+  },
+  {
+    id: "minimalist",
+    label: "Minimalist",
+    icon: "✨",
+    hint: "Clean modern sans, subtle and understated",
+    style: {
+      font_family: "Outfit",
+      font_size: 38,
+      font_color: "#FFFFFF",
+      text_position: "bottom",
+      lyric_mode: "phrase",
+      shadow_opacity: 0.45,
+      shadow_blur: 6,
+    },
+  },
+];
+
 export default function OverlayControls({ style, onChange }) {
   const [fonts, setFonts] = useState(FALLBACK_FONTS);
 
@@ -38,6 +119,43 @@ export default function OverlayControls({ style, onChange }) {
 
   return (
     <div className="space-y-6">
+      {/* 1-Click Aesthetic Presets */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <span className="label-tracking">1-Click Style Presets</span>
+          <span className="text-[10px] text-zinc-500">Instant aesthetic</span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2" data-testid="typography-presets">
+          {TYPOGRAPHY_PRESETS.map((p) => {
+            const isMatch =
+              style.font_family === p.style.font_family &&
+              style.lyric_mode === p.style.lyric_mode &&
+              style.text_position === p.style.text_position;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => onChange({ ...style, ...p.style })}
+                title={p.hint}
+                data-testid={`preset-${p.id}`}
+                className={`p-2 rounded border text-left transition-all ${
+                  isMatch
+                    ? "border-amber-500 bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/30"
+                    : "border-zinc-800 bg-[#0d0d0d] hover:border-zinc-700 text-zinc-300"
+                }`}
+              >
+                <div className="flex items-center gap-1.5 text-xs font-medium">
+                  <span>{p.icon}</span>
+                  <span className="truncate">{p.label}</span>
+                </div>
+                <div className="text-[10px] text-zinc-500 truncate mt-0.5">
+                  {p.style.font_family} · {p.style.lyric_mode}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
       <div>
         <span className="label-tracking block mb-2">Lyric mode</span>
         <div className="grid grid-cols-3 gap-2" data-testid="lyric-mode-grid">

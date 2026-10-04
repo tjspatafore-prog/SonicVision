@@ -13,6 +13,7 @@ import {
   setBurnSubtitles,
   downloadSrtUrl,
   downloadVideoUrl,
+  previewVideoUrl,
   teaserUrl,
 } from "@/lib/api";
 import { presetByKey } from "@/lib/stylePresets";
@@ -114,7 +115,9 @@ export default function Editor() {
     project.status,
   );
   const isCompleted = project.status === "completed";
-  const videoSrc = project.video_filename ? fileUrl(project.id, project.video_filename) : null;
+  // The editor preview ALWAYS streams the clean video so the user has 0ms latency live overlay!
+  const hasVideo = Boolean(project.clean_video_filename || project.video_filename);
+  const videoSrc = hasVideo ? previewVideoUrl(project.id) : null;
   const isVertical = project.aspect_ratio === "9:16";
   const baseVideoHeight = isVertical ? 1280 : 720;
   const styleMeta = presetByKey(project.style);
@@ -122,14 +125,8 @@ export default function Editor() {
   const previewImage = previewScene?.image_filename
     ? fileUrl(project.id, previewScene.image_filename)
     : null;
-  // The rendered MP4 has lyrics burned in only if last_render_burn_subtitles is true.
-  // Otherwise we always paint the live React overlay on top so the user can iterate freely.
-  // Fallback to project.burn_subtitles for projects rendered before that field existed
-  // (so old burned MP4s don't show double lyrics).
-  const renderHasBurned =
-    project.last_render_burn_subtitles ??
-    (project.burn_subtitles ? true : false);
-  const showLiveOverlay = !renderHasBurned;
+  // Always display the interactive live overlay in the preview player
+  const showLiveOverlay = true;
 
   const textPos = overlayDraft.text_position || "center";
 
@@ -232,13 +229,13 @@ export default function Editor() {
       }
       await setBurnSubtitles(id, true);
       await triggerRender(id);
-      toast.message("Baking lyrics into the MP4… this can take a few minutes.");
+      toast.message("Baking lyrics into MP4 with FFmpeg... (usually takes ~5-15s)");
 
-      // Poll until done (max ~15 min)
+      // Poll until done (fast bake takes ~5-15s)
       let p = project;
       const start = Date.now();
       while (Date.now() - start < 15 * 60 * 1000) {
-        await new Promise((r) => setTimeout(r, 4000));
+        await new Promise((r) => setTimeout(r, 1500));
         p = await getProject(id);
         setProject(p);
         if (p.status === "completed") break;
@@ -255,7 +252,7 @@ export default function Editor() {
       document.body.appendChild(a);
       a.click();
       a.remove();
-      toast.success("Done! Your MP4 with burned lyrics is downloading.");
+      toast.success("Done! Your MP4 with baked lyrics is downloading.");
     } catch (e) {
       toast.error(e.message || "Bake failed");
     } finally {

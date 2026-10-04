@@ -13,6 +13,9 @@ export const audioUrl = (projectId) =>
 export const downloadVideoUrl = (projectId) =>
   `${API}/projects/${projectId}/video`;
 
+export const previewVideoUrl = (projectId) =>
+  `${API}/projects/${projectId}/preview-video`;
+
 export const downloadSrtUrl = (projectId) =>
   `${API}/projects/${projectId}/srt`;
 

@@ -31,6 +31,7 @@ from ai_services import (
 import providers
 import scenes as scene_builder
 from teaser_engine import render_teaser
+from video_engine import burn_subtitles_fast
 
 STORAGE_DIR = ROOT_DIR / "storage"
 STORAGE_DIR.mkdir(exist_ok=True)
@@ -119,6 +120,8 @@ class Project(BaseModel):
     scenes: List[Scene] = Field(default_factory=list)
     overlay_style: Dict[str, Any] = Field(default_factory=lambda: dict(DEFAULT_OVERLAY))
     video_filename: Optional[str] = None
+    clean_video_filename: Optional[str] = None
+    clean_video_stale: bool = False
     srt_filename: Optional[str] = None
     teaser_status: str = "none"  # none, generating, completed, failed
     teaser_files: Dict[str, str] = Field(default_factory=dict)  # {"9:16": "teaser_9_16.mp4", ...}
@@ -477,19 +480,23 @@ async def _run_pipeline(project_id: str) -> None:
                     "overlay_override": s.overlay_override,
                 })
 
-        video_name = "music_video.mp4"
-        video_path = str(pdir / video_name)
+        clean_name = "music_video_clean.mp4"
+        clean_path = str(pdir / clean_name)
         await _run_render_subprocess(
             project_id,
             scenes_for_render,
             audio_path,
-            video_path,
+            clean_path,
             project.overlay_style,
             project.audio_duration,
             project.aspect_ratio,
             project.resolution,
             False,  # initial pipeline ALWAYS renders clean — user iterates on the live overlay in the editor and re-renders to bake
         )
+
+        video_name = "music_video.mp4"
+        video_path = pdir / video_name
+        shutil.copyfile(clean_path, str(video_path))
 
         srt_name = "subtitles.srt"
         srt_path = pdir / srt_name
@@ -501,8 +508,10 @@ async def _run_pipeline(project_id: str) -> None:
         await _update_fields(
             project_id,
             video_filename=video_name,
+            clean_video_filename=clean_name,
             srt_filename=srt_name,
             last_render_burn_subtitles=False,
+            clean_video_stale=False,
             status="completed",
             progress=100,
         )
@@ -542,19 +551,67 @@ async def _render_only(project_id: str) -> None:
         if not scenes_for_render:
             raise RuntimeError("No scenes with images available to render")
 
+        clean_name = "music_video_clean.mp4"
+        clean_path = pdir / clean_name
         video_name = "music_video.mp4"
-        video_path = str(pdir / video_name)
-        await _run_render_subprocess(
-            project_id,
-            scenes_for_render,
-            audio_path,
-            video_path,
-            project.overlay_style,
-            project.audio_duration,
-            project.aspect_ratio,
-            project.resolution,
-            project.burn_subtitles,
-        )
+        video_path = pdir / video_name
+
+        # If a legacy clean video was stored as music_video.mp4, preserve it
+        if not clean_path.exists() and video_path.exists() and not getattr(project, "last_render_burn_subtitles", False):
+            try:
+                shutil.copyfile(str(video_path), str(clean_path))
+            except Exception:
+                pass
+
+        # Check if we can perform an ultra-fast FFmpeg subtitle bake (~5-10s)
+        can_fast_bake = clean_path.exists() and not getattr(project, "clean_video_stale", False)
+
+        if can_fast_bake:
+            if project.burn_subtitles:
+                logger.info("[%s] Fast baking subtitles with native FFmpeg in ~5-10s...", project_id)
+                await asyncio.to_thread(
+                    burn_subtitles_fast,
+                    str(clean_path),
+                    scenes_for_render,
+                    project.overlay_style,
+                    str(video_path),
+                    project.aspect_ratio,
+                    project.resolution,
+                )
+                last_burn = True
+            else:
+                if not (clean_path.resolve() == video_path.resolve()):
+                    shutil.copyfile(str(clean_path), str(video_path))
+                last_burn = False
+        else:
+            # Full render needed (e.g. repainted scene images or changed scene start times)
+            logger.info("[%s] Rendering full clean video clips...", project_id)
+            await _run_render_subprocess(
+                project_id,
+                scenes_for_render,
+                audio_path,
+                str(clean_path),
+                project.overlay_style,
+                project.audio_duration,
+                project.aspect_ratio,
+                project.resolution,
+                False,  # always render clean base video
+            )
+            if project.burn_subtitles:
+                logger.info("[%s] Fast baking subtitles onto newly rendered clean video...", project_id)
+                await asyncio.to_thread(
+                    burn_subtitles_fast,
+                    str(clean_path),
+                    scenes_for_render,
+                    project.overlay_style,
+                    str(video_path),
+                    project.aspect_ratio,
+                    project.resolution,
+                )
+                last_burn = True
+            else:
+                shutil.copyfile(str(clean_path), str(video_path))
+                last_burn = False
 
         srt_name = "subtitles.srt"
         (pdir / srt_name).write_text(
@@ -565,11 +622,14 @@ async def _render_only(project_id: str) -> None:
         await _update_fields(
             project_id,
             video_filename=video_name,
+            clean_video_filename=clean_name,
             srt_filename=srt_name,
-            last_render_burn_subtitles=bool(project.burn_subtitles),
+            last_render_burn_subtitles=last_burn,
+            clean_video_stale=False,
             status="completed",
             progress=100,
         )
+        logger.info("[%s] Render completed (burn=%s)", project_id, last_burn)
     except asyncio.CancelledError:
         logger.info("[%s] Re-render cancelled by user", project_id)
         await _update_fields(project_id, status="cancelled")
@@ -889,6 +949,7 @@ async def regenerate_scene_image(project_id: str, idx: int, image_idx: int = 0):
         raise HTTPException(500, f"Image generation failed: {exc}")
 
     project.scenes[idx] = scene
+    project.clean_video_stale = True
     await _save_project(project)
     return project
 
@@ -915,6 +976,7 @@ async def update_scene(project_id: str, idx: int, body: SceneUpdate):
         if idx > 0:
             project.scenes[idx - 1].end = new_start
         scene.start = new_start
+        project.clean_video_stale = True
     # overlay_override is a partial dict (font_family, font_color, font_size, etc.) or
     # an empty dict to clear the override entirely.
     if body.overlay_override is not None:
@@ -978,6 +1040,21 @@ async def download_video(project_id: str):
         media_type="video/mp4",
         filename=f"{project.name}.mp4",
     )
+
+
+@api_router.get("/projects/{project_id}/preview-video")
+async def preview_video(project_id: str):
+    """Serve the pristine clean video for zero-latency live overlay in the editor."""
+    project = await _get_project(project_id)
+    pdir = STORAGE_DIR / project_id
+    if project.clean_video_filename and (pdir / project.clean_video_filename).exists():
+        path = pdir / project.clean_video_filename
+    elif project.video_filename and (pdir / project.video_filename).exists():
+        path = pdir / project.video_filename
+    else:
+        raise HTTPException(404, "Video not yet generated")
+    return FileResponse(path, media_type="video/mp4")
+
 
 
 # ---------- Teaser ----------
