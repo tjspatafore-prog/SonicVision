@@ -576,6 +576,7 @@ export default function Editor() {
               scenes={project.scenes}
               onSceneJump={(idx) => scrollToScene(idx)}
               onSceneStartChange={updateSceneStart}
+              onTimeUpdate={setPreviewTime}
             />
           </div>
         )}

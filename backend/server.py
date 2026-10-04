@@ -177,17 +177,27 @@ async def _is_cancelled(project_id: str) -> bool:
 
 
 def _force_kill_pgid(pid: int) -> None:
+    import sys
     try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
+        if sys.platform == "win32":
+            import subprocess
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+        else:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except Exception:
         pass
 
 
-def _terminate_render_proc(proc: asyncio.subprocess.Process) -> None:
+def _terminate_render_proc(proc) -> None:
     """SIGTERM the process group, then SIGKILL after a short grace."""
+    import sys
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
+        if sys.platform == "win32":
+            import subprocess
+            subprocess.run(["taskkill", "/T", "/PID", str(proc.pid)], capture_output=True)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except Exception:
         return
     try:
         loop = asyncio.get_event_loop()
@@ -220,20 +230,32 @@ async def _run_render_subprocess(
     })
 
     runner_path = str(ROOT_DIR / "render_runner.py")
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        runner_path,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    
+    import subprocess
+    import sys
+    
+    kwargs = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+
+    log_path = ROOT_DIR / f"render_{project_id}.log"
+    log_file = open(str(log_path), "w")
+
+    proc = subprocess.Popen(
+        [sys.executable, runner_path],
+        stdin=subprocess.PIPE,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
         cwd=str(ROOT_DIR),
-        start_new_session=True,
+        **kwargs
     )
     _render_processes[project_id] = proc
 
     assert proc.stdin is not None
     proc.stdin.write(payload.encode("utf-8"))
-    await proc.stdin.drain()
+    proc.stdin.flush()
     proc.stdin.close()
 
     estimated = max(15.0, float(audio_duration) * 1.2)
@@ -241,11 +263,9 @@ async def _run_render_subprocess(
 
     try:
         while True:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=1.5)
+            if proc.poll() is not None:
                 break
-            except asyncio.TimeoutError:
-                pass
+            await asyncio.sleep(1.5)
 
             if await _is_cancelled(project_id):
                 _terminate_render_proc(proc)
@@ -256,11 +276,18 @@ async def _run_render_subprocess(
             await _update_fields(project_id, progress=85 + int(13 * ratio))
 
         if proc.returncode != 0:
-            err = (await proc.stderr.read()).decode("utf-8", errors="ignore") if proc.stderr else ""
+            err = ""
+            if log_path.exists():
+                with open(log_path, "r") as f:
+                    err = f.read()[-1000:]
             raise RuntimeError(
-                f"Render subprocess failed (exit={proc.returncode}): {err.strip()[:500]}"
+                f"Render subprocess failed (exit={proc.returncode}): {err}"
             )
     finally:
+        try:
+            log_file.close()
+        except Exception:
+            pass
         _render_processes.pop(project_id, None)
 
 

@@ -87,3 +87,8 @@ backend/storage/7fb0d6ed-20b5-46f0-86a1-93c1c0377392/music_video.mp4
 credentials.json
 *.key
 .credentials
+
+# Local generated media + render logs
+backend/storage/
+backend/render_*.log
+

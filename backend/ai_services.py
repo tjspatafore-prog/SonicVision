@@ -82,18 +82,15 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
     """
     client = _get_gemini_client()
 
-    audio_file = await client.aio.files.upload(file=audio_path)
+    # Read audio file as bytes and send inline (avoids File API which may be blocked)
+    import mimetypes
+    mime_type, _ = mimetypes.guess_type(audio_path)
+    if not mime_type:
+        mime_type = "audio/mpeg"  # fallback
+    with open(audio_path, "rb") as f:
+        audio_bytes = f.read()
 
-    for _ in range(60):
-        state = getattr(audio_file.state, "name", str(audio_file.state))
-        if state == "ACTIVE":
-            break
-        if state == "FAILED":
-            raise RuntimeError(f"Audio upload failed: {audio_file}")
-        await asyncio.sleep(1)
-        audio_file = await client.aio.files.get(name=audio_file.name)
-    else:
-        raise RuntimeError("Audio file did not become ACTIVE within 60 seconds")
+    audio_part = genai_types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
 
     word_schema = genai_types.Schema(
         type=genai_types.Type.OBJECT,
@@ -129,21 +126,15 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
         required=["duration_seconds", "visual_concept", "segments"],
     )
 
-    try:
-        response = await client.aio.models.generate_content(
-            model="gemini-2.5-pro",
-            contents=[_TRANSCRIPTION_PROMPT, audio_file],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=schema,
-                temperature=0.1,
-            ),
-        )
-    finally:
-        try:
-            await client.aio.files.delete(name=audio_file.name)
-        except Exception:
-            pass
+    response = await client.aio.models.generate_content(
+        model="gemini-2.5-pro",
+        contents=[_TRANSCRIPTION_PROMPT, audio_part],
+        config=genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=schema,
+            temperature=0.1,
+        ),
+    )
 
     parsed = json.loads(response.text)
     duration = float(parsed.get("duration_seconds") or 0.0)
@@ -284,7 +275,7 @@ def _build_image_prompt(
     )
 
     context_block = (
-        f"OVERALL SONG WORLD (every scene MUST live in this exact world for visual continuity): {song_context}\n\n"
+        f"(Visual Theme Context: {song_context})\n"
         if song_context else ""
     )
 
@@ -292,22 +283,19 @@ def _build_image_prompt(
         subject_block = (
             "This is the OPENING TITLE SHOT for a music video"
             + (f' titled "{song_title}"' if song_title else "")
-            + ". Render an evocative establishing shot that introduces the world of the song. "
-            "Do NOT include any text, song titles, or letters in the image — just an iconic, "
-            "atmospheric scene that sets the tone."
+            + ". Render an evocative establishing shot that introduces the mood. "
+            "Do NOT include any text, song titles, or letters in the image."
         )
     elif scene_kind == "instrumental":
         subject_block = (
-            "This is an INSTRUMENTAL BRIDGE moment with no lyrics. Render an atmospheric scene that "
-            "naturally bridges two narrative moments in the song's world. Capture the mood and motion "
-            "without depicting a specific lyric or quote."
+            "This is an INSTRUMENTAL BRIDGE moment with no lyrics. Render a unique, dynamic scene "
+            "that captures motion or an emotional shift in the music. Make it visually distinct."
         )
     else:
         subject_block = (
-            f'Scene illustrating the sung lyric: "{lyric}". '
-            "Render the lyric INSIDE the song's world above — not as a literal generic image. "
-            "If the lyric mentions a common object (e.g. 'a glass of water'), place it in the world "
-            "(e.g. a battlefield, not a kitchen)."
+            f'Focus primarily on illustrating the specific action, emotion, or objects in this exact lyric: "{lyric}". '
+            "Make this image highly distinct and directly tied to the words being sung. "
+            "Use the 'Visual Theme Context' only as a background aesthetic or color palette, not as the main subject."
         )
 
     return (

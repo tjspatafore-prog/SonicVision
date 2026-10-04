@@ -23,6 +23,8 @@ export const listProjects = () => api.get("/projects").then((r) => r.data);
 export const getProject = (id) => api.get(`/projects/${id}`).then((r) => r.data);
 export const createProject = (formData) =>
   api.post("/projects", formData, { headers: { "Content-Type": "multipart/form-data" } }).then((r) => r.data);
+export const createProjectFromUrl = (body) =>
+  api.post("/projects/from-url", body).then((r) => r.data);
 export const deleteProject = (id) => api.delete(`/projects/${id}`).then((r) => r.data);
 
 export const regenerateScene = (projectId, sceneIdx, imageIdx = 0) =>

@@ -3,7 +3,7 @@ import WaveSurfer from "wavesurfer.js";
 import RegionsPlugin from "wavesurfer.js/dist/plugins/regions.esm.js";
 import { Play, Pause } from "lucide-react";
 
-export default function Waveform({ audioUrl, scenes, onSceneJump, onSceneStartChange }) {
+export default function Waveform({ audioUrl, scenes, onSceneJump, onSceneStartChange, onTimeUpdate }) {
   const containerRef = useRef(null);
   const wsRef = useRef(null);
   const regionsRef = useRef(null);
@@ -36,8 +36,16 @@ export default function Waveform({ audioUrl, scenes, onSceneJump, onSceneStartCh
       setReady(true);
       setTotalTime(ws.getDuration());
     });
-    ws.on("audioprocess", () => setCurrentTime(ws.getCurrentTime()));
-    ws.on("seeking", () => setCurrentTime(ws.getCurrentTime()));
+    ws.on("audioprocess", () => {
+      const t = ws.getCurrentTime();
+      setCurrentTime(t);
+      onTimeUpdate?.(t);
+    });
+    ws.on("seeking", () => {
+      const t = ws.getCurrentTime();
+      setCurrentTime(t);
+      onTimeUpdate?.(t);
+    });
     ws.on("play", () => setPlaying(true));
     ws.on("pause", () => setPlaying(false));
     ws.on("finish", () => setPlaying(false));
