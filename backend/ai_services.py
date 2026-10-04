@@ -191,6 +191,90 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
     }
 
 
+STYLE_PRESETS = {
+    "cinematic": "cinematic atmospheric scene, dramatic moody lighting, painterly photographic style, rich color grading, shallow depth of field",
+    "anime": "Studio Ghibli inspired anime illustration, soft watercolor textures, expressive line work, vibrant nature, magical atmosphere",
+    "vintage_film": "1970s Kodachrome film photograph, warm faded tones, light grain, soft sun flares, retro nostalgic atmosphere",
+    "neon_cyberpunk": "neon cyberpunk scene, rain-soaked streets, vivid pink and electric blue neon signs, futuristic cityscape, dramatic chiaroscuro lighting",
+    "watercolor": "loose watercolor painting on textured paper, soft washes of color, visible brush strokes, gentle dreamy mood, paper grain",
+    "oil_painting": "classical oil painting in Renaissance style, rich impasto brushwork, golden chiaroscuro lighting, dramatic composition, baroque atmosphere",
+    "film_noir": "black and white film noir photograph, high contrast shadows, venetian blind light patterns, 1940s cinematic mood, smoky atmosphere",
+    "pixel_art": "16-bit pixel art illustration, retro SNES JRPG style, vibrant limited palette, crisp pixel edges, dithered shading, isometric perspective",
+    "comic_book": "graphic novel comic book illustration, bold ink outlines, halftone shading, dramatic action panel composition, saturated comic colors",
+    "pastel_dream": "soft pastel dreamscape, lavender and rose color palette, soft glow, ethereal cloud-like atmosphere, fairytale lighting",
+    "synthwave": "1980s synthwave retro-futurism, magenta and cyan grid horizon, palm tree silhouettes, glowing sun, chrome reflections, outrun aesthetic",
+    "documentary": "candid documentary photograph, natural light, photojournalism aesthetic, realistic textures, 35mm film grain, raw emotional moment",
+    "lofi_cafe": "cozy lo-fi anime aesthetic, warm cafe interior, rainy window, soft afternoon light, hand-drawn illustration style, peaceful study vibe",
+    "surrealist": "Salvador Dali inspired surrealist oil painting, melting impossible forms, dreamlike desert landscape, hyper-detailed strange symbolism",
+    "bronze_relief": "ancient bronze bas-relief sculpture carved into a single solid metal panel, warm bronze patina with subtle verdigris accents, intricate raised figures and scenery cast in metal, dramatic side lighting casting deep shadows across the textured metal surface, weathered aged museum-artifact aesthetic, monochromatic bronze tones, no painted color",
+}
+
+
+def _build_image_prompt(
+    lyric: str,
+    style: str = "cinematic",
+    aspect_ratio: str = "16:9",
+    custom_style: Optional[str] = None,
+    variation_idx: int = 0,
+    song_context: str = "",
+    scene_kind: str = "lyric",
+    song_title: str = "",
+) -> str:
+    if style == "other" and custom_style:
+        style_suffix = custom_style.strip()
+    else:
+        style_suffix = STYLE_PRESETS.get(style, STYLE_PRESETS["cinematic"])
+    composition = (
+        "vertical 9:16 portrait composition, tall framing"
+        if aspect_ratio == "9:16"
+        else "wide 16:9 cinematic composition, landscape framing"
+    )
+    variations = [
+        "wide establishing shot, full scene visible",
+        "medium close-up framing, focus on a key symbolic detail",
+        "low angle dramatic perspective, alternate moment of the same scene",
+        "high angle overhead view, different point of view of the scene",
+    ]
+    variation_hint = (
+        f" Variation {variation_idx + 1}: {variations[variation_idx % len(variations)]}."
+        if variation_idx > 0
+        else ""
+    )
+
+    context_block = (
+        f"(Visual Theme Context: {song_context})\n"
+        if song_context else ""
+    )
+
+    if scene_kind == "title":
+        subject_block = (
+            "This is the OPENING TITLE SHOT for a music video"
+            + (f' titled "{song_title}"' if song_title else "")
+            + ". Render an evocative establishing shot that introduces the mood. "
+            "Do NOT include any text, song titles, or letters in the image."
+        )
+    elif scene_kind == "instrumental":
+        subject_block = (
+            "This is an INSTRUMENTAL BRIDGE moment with no lyrics. Render a unique, dynamic scene "
+            "that captures motion or an emotional shift in the music. Make it visually distinct."
+        )
+    else:
+        subject_block = (
+            f'Focus primarily on illustrating the specific action, emotion, or objects in this exact lyric: "{lyric}". '
+            "Make this image highly distinct and directly tied to the words being sung. "
+            "Use the 'Visual Theme Context' only as a background aesthetic or color palette, not as the main subject."
+        )
+
+    return (
+        f"{context_block}"
+        f"{subject_block} "
+        f"Style: {style_suffix}. "
+        f"Composition: {composition}.{variation_hint} "
+        "Absolutely no text, captions, watermarks, logos, subtitles, or written words anywhere in the image. "
+        "Focus on mood, scenery, characters, and symbolism."
+    )
+
+
 async def generate_art_director_prompts(
     scenes: List[Dict[str, Any]],
     visual_concept: str,
