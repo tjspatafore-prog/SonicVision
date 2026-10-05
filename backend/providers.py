@@ -27,23 +27,49 @@ def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 
 
+MODEL_ALIASES: Dict[str, str] = {
+    # Google Gemini
+    "gemini-3.1-pro": "gemini-3.1-pro-preview",
+    "gemini-3.8-flash-high": "gemini-3.8-flash",
+    "gemini-3.8-flash-image": "gemini-3.1-flash-image",
+    # Anthropic Claude
+    "claude-opus-5-5": "claude-3-opus-latest",
+    "claude-sonnet-5-5": "claude-3-5-sonnet-latest",
+    "claude-opus-5": "claude-3-opus-latest",
+    # OpenAI
+    "gpt-6.1-sol": "gpt-4o",
+    "openai-6.1-sol": "gpt-4o",
+    "gpt-image-2.5-flare": "gpt-image-1-mini",
+    # xAI Grok
+    "grok-4.6": "grok-2-latest",
+    "grok-4": "grok-2-latest",
+}
+
+
+def resolve_model(raw_name: str, fallback: str) -> str:
+    name = (raw_name or "").strip()
+    if not name:
+        return fallback
+    return MODEL_ALIASES.get(name, name)
+
+
 # ---------- Model IDs (override any of these in backend/.env) ----------
 def models() -> Dict[str, str]:
     return {
         # Lyrics text + visual concept (Gemini reads sung lyrics very well)
-        "gemini_transcribe": _env("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-pro"),
+        "gemini_transcribe": resolve_model(_env("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-pro"), "gemini-2.5-pro"),
         # Acoustic word timestamps
         "deepgram": _env("DEEPGRAM_MODEL", "nova-3"),
         "whisper": _env("WHISPER_MODEL", "whisper-1"),
         # "Art director" prompt writers
-        "claude_text": _env("CLAUDE_TEXT_MODEL", "claude-sonnet-5-5"),
-        "openai_text": _env("OPENAI_TEXT_MODEL", "gpt-5.4-mini"),
-        "gemini_text": _env("GEMINI_TEXT_MODEL", "gemini-2.5-flash"),
-        "grok_text": _env("GROK_TEXT_MODEL", "grok-4"),
+        "claude_text": resolve_model(_env("CLAUDE_TEXT_MODEL", "claude-3-5-sonnet-latest"), "claude-3-5-sonnet-latest"),
+        "openai_text": resolve_model(_env("OPENAI_TEXT_MODEL", "gpt-4o"), "gpt-4o"),
+        "gemini_text": resolve_model(_env("GEMINI_TEXT_MODEL", "gemini-3.8-flash"), "gemini-2.5-flash"),
+        "grok_text": resolve_model(_env("GROK_TEXT_MODEL", "grok-2-latest"), "grok-2-latest"),
         # Image generators
-        "grok_image": _env("GROK_IMAGE_MODEL", "grok-imagine-image"),
-        "gemini_image": _env("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
-        "openai_image": _env("OPENAI_IMAGE_MODEL", "gpt-image-1-mini"),
+        "grok_image": resolve_model(_env("GROK_IMAGE_MODEL", "grok-imagine-image"), "grok-imagine-image"),
+        "gemini_image": resolve_model(_env("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"), "gemini-3.1-flash-image"),
+        "openai_image": resolve_model(_env("OPENAI_IMAGE_MODEL", "gpt-image-1-mini"), "gpt-image-1-mini"),
     }
 
 
@@ -220,14 +246,24 @@ async def llm_json(provider: str, system: str, user: str, max_tokens: int = 8000
         key = _env("ANTHROPIC_API_KEY")
         if not key:
             raise RuntimeError("ANTHROPIC_API_KEY is not set")
+        model = m["claude_text"]
         async with httpx.AsyncClient(timeout=180) as c:
             r = await c.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": key, "anthropic-version": "2023-06-01",
                          "content-type": "application/json"},
-                json={"model": m["claude_text"], "max_tokens": max_tokens, "system": system,
+                json={"model": model, "max_tokens": max_tokens, "system": system,
                       "messages": [{"role": "user", "content": user}]},
             )
+            if r.status_code == 404 or "not_found" in r.text.lower():
+                logger.warning("Claude model '%s' not found; retrying with claude-3-5-sonnet-latest", model)
+                r = await c.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"},
+                    json={"model": "claude-3-5-sonnet-latest", "max_tokens": max_tokens, "system": system,
+                          "messages": [{"role": "user", "content": user}]},
+                )
         if r.status_code >= 400:
             raise RuntimeError(f"Claude API {r.status_code}: {r.text[:300]}")
         data = r.json()
@@ -237,24 +273,52 @@ async def llm_json(provider: str, system: str, user: str, max_tokens: int = 8000
     if provider in ("openai", "grok"):
         client = openai_client() if provider == "openai" else xai_client()
         model = m["openai_text"] if provider == "openai" else m["grok_text"]
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            response_format={"type": "json_object"},
-        )
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                response_format={"type": "json_object"},
+            )
+        except Exception as exc:
+            if "404" in str(exc) or "model_not_found" in str(exc).lower() or "does not exist" in str(exc).lower():
+                fallback_model = "gpt-4o" if provider == "openai" else "grok-2-latest"
+                logger.warning("%s model '%s' not found; retrying with %s", provider, model, fallback_model)
+                resp = await client.chat.completions.create(
+                    model=fallback_model,
+                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    response_format={"type": "json_object"},
+                )
+            else:
+                raise
         return _extract_json(resp.choices[0].message.content or "")
 
     if provider == "gemini":
         from google.genai import types as gt
-        resp = await gemini_client().aio.models.generate_content(
-            model=m["gemini_text"],
-            contents=[user],
-            config=gt.GenerateContentConfig(
-                system_instruction=system,
-                response_mime_type="application/json",
-                temperature=0.7,
-            ),
-        )
+        model = m["gemini_text"]
+        try:
+            resp = await gemini_client().aio.models.generate_content(
+                model=model,
+                contents=[user],
+                config=gt.GenerateContentConfig(
+                    system_instruction=system,
+                    response_mime_type="application/json",
+                    temperature=0.7,
+                ),
+            )
+        except Exception as exc:
+            if "404" in str(exc) or "not found" in str(exc).lower():
+                logger.warning("Gemini model '%s' not found; retrying with gemini-2.5-flash", model)
+                resp = await gemini_client().aio.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[user],
+                    config=gt.GenerateContentConfig(
+                        system_instruction=system,
+                        response_mime_type="application/json",
+                        temperature=0.7,
+                    ),
+                )
+            else:
+                raise
         return _extract_json(resp.text or "")
 
     raise ValueError(f"Unknown prompt provider: {provider}")
@@ -336,11 +400,23 @@ async def generate_image(
             cfg_kwargs["image_config"] = gt.ImageConfig(aspect_ratio=aspect_ratio)
         except Exception:  # older SDKs lack ImageConfig — fall back to prompt-only framing
             pass
-        resp = await gemini_client().aio.models.generate_content(
-            model=m["gemini_image"],
-            contents=[prompt],
-            config=gt.GenerateContentConfig(**cfg_kwargs),
-        )
+        model = m["gemini_image"]
+        try:
+            resp = await gemini_client().aio.models.generate_content(
+                model=model,
+                contents=[prompt],
+                config=gt.GenerateContentConfig(**cfg_kwargs),
+            )
+        except Exception as exc:
+            if "404" in str(exc) or "not found" in str(exc).lower():
+                logger.warning("Gemini image model '%s' not found; retrying with gemini-3.1-flash-image", model)
+                resp = await gemini_client().aio.models.generate_content(
+                    model="gemini-3.1-flash-image",
+                    contents=[prompt],
+                    config=gt.GenerateContentConfig(**cfg_kwargs),
+                )
+            else:
+                raise
         for cand in resp.candidates or []:
             for part in (cand.content.parts if cand.content else []) or []:
                 inline = getattr(part, "inline_data", None)
@@ -354,9 +430,19 @@ async def generate_image(
     if provider == "openai":
         size = "1536x1024" if aspect_ratio == "16:9" else "1024x1536"
         q = quality if quality in ("low", "medium", "high", "auto") else "low"
-        resp = await openai_client().images.generate(
-            model=m["openai_image"], prompt=prompt, size=size, quality=q, n=1,
-        )
+        model = m["openai_image"]
+        try:
+            resp = await openai_client().images.generate(
+                model=model, prompt=prompt, size=size, quality=q, n=1,
+            )
+        except Exception as exc:
+            if "404" in str(exc) or "model_not_found" in str(exc).lower():
+                logger.warning("OpenAI image model '%s' not found; retrying with gpt-image-1-mini", model)
+                resp = await openai_client().images.generate(
+                    model="gpt-image-1-mini", prompt=prompt, size=size, quality=q, n=1,
+                )
+            else:
+                raise
         if not resp.data:
             raise RuntimeError("OpenAI image API returned no image")
         d = resp.data[0]

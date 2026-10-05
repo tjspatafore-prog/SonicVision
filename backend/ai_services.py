@@ -106,15 +106,31 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
     )
 
     model_name = providers.models().get("gemini_transcribe", "gemini-2.5-pro")
-    response = await client.aio.models.generate_content(
-        model=model_name,
-        contents=[_TRANSCRIPTION_PROMPT, audio_part],
-        config=genai_types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=schema,
-            temperature=0.1,
-        ),
-    )
+    try:
+        response = await client.aio.models.generate_content(
+            model=model_name,
+            contents=[_TRANSCRIPTION_PROMPT, audio_part],
+            config=genai_types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=schema,
+                temperature=0.1,
+            ),
+        )
+    except Exception as exc:
+        err_msg = str(exc)
+        if "404" in err_msg or "not found" in err_msg.lower():
+            logger.warning("Gemini model '%s' returned 404; automatically falling back to gemini-2.5-pro", model_name)
+            response = await client.aio.models.generate_content(
+                model="gemini-2.5-pro",
+                contents=[_TRANSCRIPTION_PROMPT, audio_part],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    temperature=0.1,
+                ),
+            )
+        else:
+            raise
 
     parsed = json.loads(response.text)
     visual_concept = (parsed.get("visual_concept") or "").strip()
