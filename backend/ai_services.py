@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from google.genai import types as genai_types
@@ -20,6 +21,53 @@ logger = logging.getLogger("sonicvision.ai")
 
 def _get_gemini_client():
     return providers.gemini_client()
+
+
+def _extract_response_text(resp: Any) -> str:
+    """Safely extract text from a Gemini response object."""
+    if resp is None:
+        return ""
+    try:
+        if getattr(resp, "text", None):
+            return str(resp.text).strip()
+    except Exception:
+        pass
+
+    candidates = getattr(resp, "candidates", None) or []
+    for cand in candidates:
+        content = getattr(cand, "content", None)
+        parts = getattr(content, "parts", None) or []
+        texts = []
+        for p in parts:
+            t = getattr(p, "text", None)
+            if t:
+                texts.append(t)
+        if texts:
+            return "".join(texts).strip()
+    return ""
+
+
+def _parse_json_safely(raw_text: str) -> Dict[str, Any]:
+    """Parse JSON string, stripping markdown code fences if present."""
+    if not raw_text:
+        raise ValueError("Received empty text response from AI model")
+
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    elif cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        m = re.search(r"(\{.*\})", cleaned, re.DOTALL)
+        if m:
+            return json.loads(m.group(1))
+        raise
 
 
 _TRANSCRIPTION_PROMPT = """You are transcribing and analyzing the LYRICS of a song.
@@ -43,19 +91,12 @@ OUTPUT JSON ONLY (no prose, no markdown) with these fields:
    - Skip purely instrumental sections (do NOT emit empty/placeholder segments for them).
    - "text" = exact words sung in that phrase, naturally capitalized, no end punctuation unless it carries meaning (?, !).
    - Best-guess unclear words; do not insert "[unclear]" placeholders.
-   - "words" = ordered list of every word in this segment with its own decimal start/end timestamps:
-       [{"text": "I", "start_seconds": 12.34, "end_seconds": 12.45},
-        {"text": "was", "start_seconds": 12.45, "end_seconds": 12.62},
-        ...]
-     Word timestamps drive KARAOKE highlighting and KINETIC TYPOGRAPHY in the video — be as precise as you can.
-     Held/sustained syllables should have a longer end_seconds. Words inside a quick run should be tightly packed.
-     Each word's text should NOT include leading/trailing whitespace or punctuation glyphs (commas, periods).
 """
 
 
 async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
-    """Transcribe singing lyrics with phrase-level + word-level timestamps and derive a song-wide
-    visual concept, in a single Gemini 2.5 Pro call.
+    """Transcribe singing lyrics with phrase-level timestamps and derive a song-wide
+    visual concept in Gemini, then align exact word timings via Deepgram Nova-3 / Whisper.
 
     Returns dict with 'text', 'duration', 'segments' (each with start/end/text/words), 'visual_concept'.
     """
@@ -71,15 +112,6 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
 
     audio_part = genai_types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
 
-    word_schema = genai_types.Schema(
-        type=genai_types.Type.OBJECT,
-        properties={
-            "text": genai_types.Schema(type=genai_types.Type.STRING),
-            "start_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
-            "end_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
-        },
-        required=["text", "start_seconds", "end_seconds"],
-    )
     schema = genai_types.Schema(
         type=genai_types.Type.OBJECT,
         properties={
@@ -93,46 +125,53 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
                         "start_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
                         "end_seconds": genai_types.Schema(type=genai_types.Type.NUMBER),
                         "text": genai_types.Schema(type=genai_types.Type.STRING),
-                        "words": genai_types.Schema(
-                            type=genai_types.Type.ARRAY,
-                            items=word_schema,
-                        ),
                     },
-                    required=["start_seconds", "end_seconds", "text", "words"],
+                    required=["start_seconds", "end_seconds", "text"],
                 ),
             ),
         },
         required=["duration_seconds", "visual_concept", "segments"],
     )
 
-    model_name = providers.models().get("gemini_transcribe", "gemini-2.5-pro")
-    try:
-        response = await client.aio.models.generate_content(
-            model=model_name,
-            contents=[_TRANSCRIPTION_PROMPT, audio_part],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=schema,
-                temperature=0.1,
-            ),
-        )
-    except Exception as exc:
-        err_msg = str(exc)
-        if "404" in err_msg or "not found" in err_msg.lower():
-            logger.warning("Gemini model '%s' returned 404; automatically falling back to gemini-2.5-pro", model_name)
+    primary_model = providers.models().get("gemini_transcribe", "gemini-2.5-pro")
+    candidate_models = [primary_model]
+    for m in ["gemini-2.5-flash", "gemini-2.5-pro"]:
+        if m not in candidate_models:
+            candidate_models.append(m)
+
+    parsed = None
+    last_exc = None
+    for model_name in candidate_models:
+        try:
+            logger.info("Calling Gemini transcription with model: %s", model_name)
             response = await client.aio.models.generate_content(
-                model="gemini-2.5-pro",
+                model=model_name,
                 contents=[_TRANSCRIPTION_PROMPT, audio_part],
                 config=genai_types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=schema,
                     temperature=0.1,
+                    max_output_tokens=8192,
                 ),
             )
-        else:
-            raise
+            raw_text = _extract_response_text(response)
+            if raw_text:
+                candidate_parsed = _parse_json_safely(raw_text)
+                if isinstance(candidate_parsed, dict) and "segments" in candidate_parsed:
+                    parsed = candidate_parsed
+                    logger.info("Successfully transcribed with Gemini model: %s", model_name)
+                    break
+            logger.warning("Model '%s' returned empty or incomplete text; attempting fallback", model_name)
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("Gemini model '%s' failed during transcription: %s", model_name, exc)
+            continue
 
-    parsed = json.loads(response.text)
+    if parsed is None:
+        if last_exc:
+            raise RuntimeError(f"All Gemini transcription attempts failed. Last error: {last_exc}")
+        raise RuntimeError("Gemini returned empty transcription response")
+
     visual_concept = (parsed.get("visual_concept") or "").strip()
 
     # Get real audio duration from ffprobe/moviepy
